@@ -1,0 +1,31 @@
+name: firestore_plus
+description: "Production-ready Firestore utilities for Flutter — caching, retry, error handling, pagination, logging, transactions, batch operations and more."
+version: 0.0.1
+homepage: https://github.com/nisargratani/firestore_plus
+repository: https://github.com/nisargratani/firestore_plus
+issue_tracker: https://github.com/nisargratani/firestore_plus/issues
+topics:
+  - firebase
+  - firestore
+  - flutter
+  - database
+  - cache
+
+environment:
+  sdk: ^3.3.0
+  flutter: ">=3.19.0"
+
+dependencies:
+  cloud_firestore: ^6.8.0
+  firebase_core: ^4.13.0
+  flutter:
+    sdk: flutter
+  meta: ^1.18.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  fake_cloud_firestore: ^4.2.0
+
+flutter:
