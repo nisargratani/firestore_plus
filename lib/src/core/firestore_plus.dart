@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../batch/firestore_batch.dart';
@@ -5,6 +7,7 @@ import '../cache/cache_manager.dart';
 import '../cache/cache_store.dart';
 import '../cache/memory_cache_store.dart';
 import '../collection/firestore_collection.dart';
+import '../error/error_mapper.dart';
 import '../transaction/firestore_transaction.dart';
 import 'firestore_operation.dart';
 import 'firestore_plus_config.dart';
@@ -60,14 +63,32 @@ class FirestorePlus {
 
   /// Executes the given [updateFunction] and then attempts to commit the
   /// changes applied within the transaction.
+  ///
+  /// Native Firestore transaction semantics (including its own retries on
+  /// contention) are preserved. Firestore failures are thrown as
+  /// [FirestorePlusException]; exceptions thrown by your own code inside
+  /// [updateFunction] are rethrown unchanged. Documents written in the
+  /// transaction are invalidated in the cache after it commits.
   Future<T> runTransaction<T>(
     Future<T> Function(FirestoreTransaction transaction) updateFunction, {
     Duration timeout = const Duration(seconds: 30),
     int maxAttempts = 5,
   }) async {
-    return await firestore.runTransaction<T>((nativeTransaction) async {
-      final tx = FirestoreTransaction(nativeTransaction, this);
-      return await updateFunction(tx);
-    }, timeout: timeout, maxAttempts: maxAttempts);
+    FirestoreTransaction? lastAttempt;
+    final T result;
+    try {
+      result = await firestore.runTransaction<T>((nativeTransaction) async {
+        final tx = lastAttempt = FirestoreTransaction(nativeTransaction, this);
+        return await updateFunction(tx);
+      }, timeout: timeout, maxAttempts: maxAttempts);
+    } on FirebaseException catch (e, st) {
+      throw ErrorMapper.map(e, st, 'TRANSACTION');
+    } on TimeoutException catch (e, st) {
+      throw ErrorMapper.map(e, st, 'TRANSACTION');
+    }
+    for (final path in lastAttempt?.writtenPaths ?? const <String>{}) {
+      await cache.invalidateDocument(path);
+    }
+    return result;
   }
 }

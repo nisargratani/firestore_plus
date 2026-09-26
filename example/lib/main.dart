@@ -1,27 +1,68 @@
-// ignore_for_file: avoid_print
-
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firestore_plus/firestore_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 // ---------------------------------------------------------------------------
-// 1. TYPED MODELS
+// FIREBASE SETUP
+//
+// By default this example talks to the local Firestore emulator using a demo
+// project, so it runs without any Firebase project:
+//
+//   firebase emulators:start --only firestore --project demo-firestore-plus
+//   flutter run
+//
+// To use your own project, run `flutterfire configure`, pass
+// `DefaultFirebaseOptions.currentPlatform` to `Firebase.initializeApp` and set
+// `useEmulator` to false.
 // ---------------------------------------------------------------------------
 
-/// A sample User model demonstrating typed serialization.
+const useEmulator = true;
+
+FirebaseOptions get _demoOptions {
+  final platform = kIsWeb
+      ? 'web'
+      : defaultTargetPlatform == TargetPlatform.android
+          ? 'android'
+          : 'ios';
+  return FirebaseOptions(
+    apiKey: 'demo-api-key',
+    appId: '1:1234567890:$platform:0123456789abcdef',
+    messagingSenderId: '1234567890',
+    projectId: 'demo-firestore-plus',
+  );
+}
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(options: _demoOptions);
+  if (useEmulator) {
+    final host = !kIsWeb && defaultTargetPlatform == TargetPlatform.android
+        ? '10.0.2.2' // Android emulator -> host machine
+        : 'localhost';
+    FirebaseFirestore.instance.useFirestoreEmulator(host, 8080);
+  }
+  runApp(const FirestorePlusExampleApp());
+}
+
+// ---------------------------------------------------------------------------
+// 1. TYPED MODEL
+// ---------------------------------------------------------------------------
+
 class User {
   final String id;
   final String name;
   final String email;
   final int age;
 
-  User(
-      {required this.id,
-      required this.name,
-      required this.email,
-      this.age = 0});
+  const User({
+    this.id = '',
+    required this.name,
+    required this.email,
+    this.age = 0,
+  });
 
-  /// Deserialize from Firestore document data.
   factory User.fromFirestore(Map<String, dynamic> data, String id) {
     return User(
       id: id,
@@ -31,7 +72,6 @@ class User {
     );
   }
 
-  /// Serialize to Firestore document data.
   Map<String, dynamic> toFirestore() => {
         'name': name,
         'email': email,
@@ -39,71 +79,50 @@ class User {
       };
 
   @override
-  String toString() => 'User(id: $id, name: $name, email: $email, age: $age)';
+  String toString() => 'User($id, $name, age $age)';
 }
 
 // ---------------------------------------------------------------------------
-// 2. CUSTOM LOGGER
+// 2. CUSTOM LOGGER & METRICS
 // ---------------------------------------------------------------------------
 
-/// Example custom logger that prefixes all messages with a timestamp.
-final class TimestampLogger extends FirestorePlusLogger {
+/// Forwards warnings and errors to the on-screen log.
+final class UiLogger extends FirestorePlusLogger {
+  final void Function(String line) sink;
+  const UiLogger(this.sink);
+
   @override
-  FirestoreLogLevel get logLevel => FirestoreLogLevel.debug;
+  FirestoreLogLevel get logLevel => FirestoreLogLevel.warning;
 
   @override
   void log(FirestoreLogLevel level, String message,
       {Object? error, StackTrace? stackTrace}) {
-    final timestamp = DateTime.now().toIso8601String();
-    print('[$timestamp] [${level.name.toUpperCase()}] $message');
-    if (error != null) {
-      print('[$timestamp] ERROR: $error');
-    }
+    sink('[${level.name}] $message${error != null ? ' ($error)' : ''}');
   }
 }
 
-// ---------------------------------------------------------------------------
-// 3. CUSTOM METRICS LISTENER
-// ---------------------------------------------------------------------------
-
-/// Example metrics listener that prints operation stats.
 class AppMetricsListener implements FirestoreMetricsListener {
   int totalOps = 0;
   int cacheHits = 0;
   int failures = 0;
+  int retries = 0;
 
   @override
   void onOperationComplete(FirestoreOperationMetrics metrics) {
     totalOps++;
     if (metrics.servedFromCache) cacheHits++;
     if (!metrics.isSuccess) failures++;
-    print(
-      '📊 Metric: ${metrics.type.name.toUpperCase()} ${metrics.path} '
-      '(${metrics.duration.inMilliseconds}ms, '
-      'cache: ${metrics.servedFromCache}, '
-      'retries: ${metrics.retryCount})',
-    );
+    retries += metrics.retryCount;
   }
 
-  void printSummary() {
-    print('═══ Metrics Summary ═══');
-    print('Total operations: $totalOps');
-    print('Cache hits: $cacheHits');
-    print('Failures: $failures');
-    print('═══════════════════════');
-  }
+  @override
+  String toString() => 'ops: $totalOps, cache hits: $cacheHits, '
+      'failures: $failures, retries: $retries';
 }
 
 // ---------------------------------------------------------------------------
-// MAIN APP
+// APP
 // ---------------------------------------------------------------------------
-
-void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  // In a real app, initialize Firebase first:
-  // await Firebase.initializeApp();
-  runApp(const FirestorePlusExampleApp());
-}
 
 class FirestorePlusExampleApp extends StatelessWidget {
   const FirestorePlusExampleApp({super.key});
@@ -111,48 +130,104 @@ class FirestorePlusExampleApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Firestore Plus Example',
-      theme: ThemeData(
-        colorSchemeSeed: Colors.indigo,
-        useMaterial3: true,
-      ),
+      title: 'firestore_plus example',
+      theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
       home: const ExampleHomePage(),
     );
   }
 }
 
-class ExampleHomePage extends StatelessWidget {
+class ExampleHomePage extends StatefulWidget {
   const ExampleHomePage({super.key});
+
+  @override
+  State<ExampleHomePage> createState() => _ExampleHomePageState();
+}
+
+class _ExampleHomePageState extends State<ExampleHomePage> {
+  final _log = <String>[];
+  final _metrics = AppMetricsListener();
+  late final FirestorePlus _firestorePlus;
+  late final FirestoreCollection<User> _users;
+  bool _running = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _firestorePlus = FirestorePlus(
+      FirebaseFirestore.instance,
+      config: FirestorePlusConfig(
+        defaultCachePolicy: CachePolicy.networkFirst,
+        defaultRetryPolicy: const RetryPolicy.exponential(maxAttempts: 3),
+        defaultTimeout: const Duration(seconds: 15),
+        logger: UiLogger(_print),
+        metricsListener: _metrics,
+        cacheStore: MemoryCacheStore(maxSize: 200),
+      ),
+    );
+    _users = _firestorePlus.collection<User>(
+      'users',
+      fromFirestore: User.fromFirestore,
+      toFirestore: (user) => user.toFirestore(),
+    );
+  }
+
+  void _print(String line) {
+    debugPrint(line);
+    if (mounted) setState(() => _log.add(line));
+  }
+
+  Future<void> _run() async {
+    setState(() {
+      _running = true;
+      _log.clear();
+    });
+    try {
+      await demonstrateFeatures(_firestorePlus, _users, _metrics, _print);
+    } catch (e) {
+      _print('Demo failed: $e');
+    } finally {
+      if (mounted) setState(() => _running = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Firestore Plus Example')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
+      appBar: AppBar(title: const Text('firestore_plus example')),
+      body: Column(
         children: [
-          const Text(
-            'This example demonstrates the firestore_plus package API.\n'
-            'See the source code and console output for usage patterns.',
-            style: TextStyle(fontSize: 16),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: FilledButton(
+              key: const Key('run-demo'),
+              onPressed: _running ? null : _run,
+              child: Text(_running ? 'Running…' : 'Run feature demo'),
+            ),
           ),
-          const SizedBox(height: 16),
-          ElevatedButton(
-            onPressed: () => _runExample(context),
-            child: const Text('Run Example (see console)'),
+          // Live typed query stream.
+          SizedBox(
+            height: 56,
+            child: StreamBuilder<List<User>>(
+              stream: _users.query().orderBy('age').limit(5).snapshots(),
+              builder: (context, snap) {
+                if (snap.hasError) return Text('Stream error: ${snap.error}');
+                final users = snap.data ?? const <User>[];
+                return Text('Live: ${users.map((u) => u.name).join(', ')}',
+                    textAlign: TextAlign.center);
+              },
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: _log.length,
+              itemBuilder: (_, i) => Text(_log[i],
+                  style: const TextStyle(fontFamily: 'monospace')),
+            ),
           ),
         ],
-      ),
-    );
-  }
-
-  void _runExample(BuildContext context) {
-    // In a real app with Firebase initialized, call _demonstrateFeatures().
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text(
-          'Initialize Firebase first, then uncomment _demonstrateFeatures().',
-        ),
       ),
     );
   }
@@ -162,276 +237,149 @@ class ExampleHomePage extends StatelessWidget {
 // FEATURE DEMONSTRATIONS
 // ---------------------------------------------------------------------------
 
-/// Demonstrates all major features of firestore_plus.
-///
-/// Call this after Firebase initialization:
-/// ```dart
-/// await Firebase.initializeApp();
-/// await demonstrateFeatures();
-/// ```
-Future<void> demonstrateFeatures() async {
-  final metricsListener = AppMetricsListener();
-
-  // ── 1. Initialization ──────────────────────────────────────────────────
-  print('\n═══ 1. INITIALIZATION ═══');
-
-  final firestorePlus = FirestorePlus(
-    FirebaseFirestore.instance,
-    config: FirestorePlusConfig(
-      // Cache: prefer network, fall back to cache on failure
-      defaultCachePolicy: CachePolicy.networkFirst,
-      // Retry transient failures up to 3 times
-      defaultRetryPolicy: const RetryPolicy.exponential(maxAttempts: 3),
-      // Global timeout for all operations
-      defaultTimeout: const Duration(seconds: 15),
-      // Enable request deduplication
-      enableRequestDeduplication: true,
-      // Custom logger
-      logger: TimestampLogger(),
-      // Metrics listener
-      metricsListener: metricsListener,
-      // Custom cache store (or use default MemoryCacheStore)
-      cacheStore: MemoryCacheStore(maxSize: 200),
-    ),
-  );
-
-  // ── 2. Typed Collection ────────────────────────────────────────────────
-  print('\n═══ 2. TYPED COLLECTION ═══');
-
-  final users = firestorePlus.collection<User>(
-    'users',
-    fromFirestore: User.fromFirestore,
-    toFirestore: (user) => user.toFirestore(),
-  );
-
-  // ── 3. CRUD Operations ────────────────────────────────────────────────
-  print('\n═══ 3. CRUD ═══');
-
-  // Add
+Future<void> demonstrateFeatures(
+  FirestorePlus firestorePlus,
+  FirestoreCollection<User> users,
+  AppMetricsListener metrics,
+  void Function(String) print,
+) async {
+  // ── CRUD ──────────────────────────────────────────────────────────────
+  print('═══ CRUD ═══');
   final newDoc = await users.add(
-    User(id: '', name: 'Alice', email: 'alice@example.com', age: 30),
+    const User(name: 'Alice', email: 'alice@example.com', age: 30),
   );
-  print('Added user: ${newDoc.id}');
+  print('Added ${newDoc.id}');
 
-  // Set (with specific ID)
   await users.doc('user-bob').set(
-        User(id: 'user-bob', name: 'Bob', email: 'bob@example.com', age: 25),
+        const User(name: 'Bob', email: 'bob@example.com', age: 25),
       );
-  print('Set user: user-bob');
+  print('Got: ${await users.getById(newDoc.id)}');
 
-  // Get
-  final alice = await users.getById(newDoc.id);
-  print('Got user: $alice');
-
-  // Update
   await users.doc(newDoc.id).update({'name': 'Alice Updated', 'age': 31});
-  print('Updated user');
+  print('Exists after update: ${await users.exists(newDoc.id)}');
 
-  // Exists
-  final exists = await users.exists(newDoc.id);
-  print('User exists: $exists');
-
-  // Delete
   await users.delete(newDoc.id);
-  print('Deleted user');
+  print('After delete getById returns: ${await users.getById(newDoc.id)}');
 
-  // ── 4. Queries ─────────────────────────────────────────────────────────
-  print('\n═══ 4. QUERIES ═══');
-
-  // Seed some users for queries
-  for (int i = 1; i <= 10; i++) {
-    await users.doc('q$i').set(User(
-          id: 'q$i',
-          name: 'User $i',
-          email: 'user$i@example.com',
-          age: 20 + i,
-        ));
+  // ── Queries ───────────────────────────────────────────────────────────
+  print('═══ QUERIES ═══');
+  final seed = firestorePlus.batch();
+  for (var i = 1; i <= 10; i++) {
+    seed.set(
+      users.doc('q$i'),
+      User(name: 'User $i', email: 'user$i@example.com', age: 20 + i),
+    );
   }
+  await seed.commit();
 
-  final youngUsers = await users
+  final young = await users
       .query()
       .where('age', isLessThan: 26)
       .orderBy('age')
       .limit(5)
       .get();
-  print('Young users: ${youngUsers.map((u) => u.name).toList()}');
+  print('Young users: ${young.map((u) => u.name).toList()}');
 
-  // Count
-  final count = await users.query().count();
-  print('Total users: $count');
+  final edges = await users
+      .query()
+      .where(Filter.or(
+        Filter('age', isEqualTo: 21),
+        Filter('age', isEqualTo: 30),
+      ))
+      .get();
+  print('Filter.or: ${edges.map((u) => u.age).toList()}');
+  print('Count: ${await users.query().count()}');
 
-  // ── 5. Cache Policies ──────────────────────────────────────────────────
-  print('\n═══ 5. CACHE POLICIES ═══');
-
-  // Cache first — returns cached data if available
-  final cachedUser = await users.getById(
-    'user-bob',
-    options: const FirestoreOperationOptions(
-      cachePolicy: CachePolicy.cacheFirst,
-      cacheDuration: Duration(minutes: 5),
-    ),
+  // ── Cache policies ────────────────────────────────────────────────────
+  print('═══ CACHE ═══');
+  const cacheFirst = FirestoreOperationOptions(
+    cachePolicy: CachePolicy.cacheFirst,
+    cacheDuration: Duration(minutes: 5),
   );
-  print('cacheFirst: $cachedUser');
+  await users.getById('user-bob', options: cacheFirst); // network, cached
+  await users.getById('user-bob', options: cacheFirst); // served from cache
+  print('cacheFirst twice → metrics: $metrics');
 
-  // Network only — always fetches fresh data
-  final freshUser = await users.getById(
-    'user-bob',
-    options: const FirestoreOperationOptions(
-      cachePolicy: CachePolicy.networkOnly,
-    ),
-  );
-  print('networkOnly: $freshUser');
-
-  // Stale while revalidate — returns cached, refreshes in background
-  final staleUser = await users.getById(
+  final swr = await users.getById(
     'user-bob',
     options: const FirestoreOperationOptions(
       cachePolicy: CachePolicy.staleWhileRevalidate,
     ),
   );
-  print('staleWhileRevalidate: $staleUser');
-
-  // ── 6. Cache Invalidation ──────────────────────────────────────────────
-  print('\n═══ 6. CACHE INVALIDATION ═══');
+  print('staleWhileRevalidate: $swr');
 
   await firestorePlus.cache.invalidate('users/user-bob');
-  print('Invalidated users/user-bob');
-
   await firestorePlus.cache.invalidateCollection('users');
-  print('Invalidated all users');
-
   await firestorePlus.cache.clear();
-  print('Cleared entire cache');
+  print('Cache invalidated & cleared');
 
-  // ── 7. Retry with Custom Policy ────────────────────────────────────────
-  print('\n═══ 7. RETRY ═══');
-
-  final retryUser = await users.getById(
-    'user-bob',
-    options: FirestoreOperationOptions(
-      retryPolicy: RetryPolicy(
-        maxAttempts: 5,
-        initialDelay: const Duration(milliseconds: 200),
-        maxDelay: const Duration(seconds: 5),
-        backoffMultiplier: 2.0,
-        jitter: true,
-        retryIf: (error) {
-          // Custom logic: only retry timeout errors
-          if (error is FirestorePlusException) {
-            return error.type == FirestoreErrorType.timeout;
-          }
-          return false;
-        },
-      ),
-    ),
-  );
-  print('Retry result: $retryUser');
-
-  // ── 8. Error Handling ──────────────────────────────────────────────────
-  print('\n═══ 8. ERROR HANDLING ═══');
-
+  // ── Error handling ────────────────────────────────────────────────────
+  print('═══ ERRORS ═══');
   try {
-    await users.getById('nonexistent-user');
+    await users.doc('does-not-exist').update({'age': 1});
   } on FirestorePlusException catch (e) {
-    print('Caught: ${e.type} — ${e.message}');
-    print('Operation: ${e.operation}');
-    print('Path: ${e.path}');
-    print('Original: ${e.originalException}');
+    print('Caught ${e.type.name} (code: ${e.code}) at ${e.path}');
   }
 
-  // ── 9. Pagination ──────────────────────────────────────────────────────
-  print('\n═══ 9. PAGINATION ═══');
-
-  final page1 = await users.query().orderBy('age').paginate(limit: 3);
-  print('Page 1: ${page1.items.length} items, hasMore: ${page1.hasMore}');
-
-  if (page1.hasMore && page1.cursor != null) {
-    final page2 = await users
-        .query()
-        .orderBy('age')
-        .paginate(limit: 3, startAfter: page1.cursor);
-    print('Page 2: ${page2.items.length} items, hasMore: ${page2.hasMore}');
-  }
-
-  // ── 10. Streams ────────────────────────────────────────────────────────
-  print('\n═══ 10. STREAMS ═══');
-
-  // Document stream
-  final docStream = users.doc('user-bob').snapshots();
-  print('Document stream created (listen to receive updates)');
-
-  // Query stream
-  final queryStream = users.query().where('age', isGreaterThan: 25).snapshots();
-  print('Query stream created');
-
-  // Listen briefly then cancel
-  final subscription = docStream.listen((user) {
-    print('Stream update: $user');
-  });
-  await Future.delayed(const Duration(seconds: 1));
-  await subscription.cancel();
-  print('Stream subscription cancelled');
-
-  // Consume queryStream briefly to avoid lint
-  final querySubscription = queryStream.listen((_) {});
-  await querySubscription.cancel();
-
-  // ── 11. Batch Operations ───────────────────────────────────────────────
-  print('\n═══ 11. BATCH OPERATIONS ═══');
-
-  final batch = firestorePlus.batch();
-  batch.set(
-    users.doc('batch1'),
-    User(id: 'batch1', name: 'Batch User 1', email: 'b1@example.com'),
-  );
-  batch.set(
-    users.doc('batch2'),
-    User(id: 'batch2', name: 'Batch User 2', email: 'b2@example.com'),
-  );
-  batch.update(users.doc('user-bob'), {'name': 'Bob (Batch Updated)'});
-  await batch.commit();
-  print('Batch committed');
-
-  // ── 12. Transactions ───────────────────────────────────────────────────
-  print('\n═══ 12. TRANSACTIONS ═══');
-
-  await firestorePlus.runTransaction<void>((tx) async {
-    final doc = users.doc('user-bob');
-    final user = await tx.get(doc);
-    if (user != null) {
-      tx.update(doc, {'age': user.age + 1});
-      print('Transaction: incremented Bob age to ${user.age + 1}');
-    }
-  });
-
-  // ── 13. Timeouts ───────────────────────────────────────────────────────
-  print('\n═══ 13. TIMEOUTS ═══');
-
+  // ── Retry & timeout ───────────────────────────────────────────────────
+  print('═══ RETRY & TIMEOUT ═══');
   try {
     await users.getById(
       'user-bob',
       options: const FirestoreOperationOptions(
-        timeout: Duration(seconds: 5),
+        cachePolicy: CachePolicy.networkOnly,
+        timeout: Duration(microseconds: 1), // force a timeout
+        retryPolicy: RetryPolicy(
+          maxAttempts: 2,
+          initialDelay: Duration(milliseconds: 50),
+        ),
       ),
     );
-    print('Fetched within timeout');
   } on FirestorePlusException catch (e) {
-    if (e.type == FirestoreErrorType.timeout) {
-      print('Operation timed out!');
-    }
+    print('Timed out as expected: ${e.type.name}');
   }
 
-  // ── 14. Metrics Summary ────────────────────────────────────────────────
-  print('\n═══ 14. METRICS ═══');
-  metricsListener.printSummary();
+  // ── Pagination ────────────────────────────────────────────────────────
+  print('═══ PAGINATION ═══');
+  PaginationCursor? cursor;
+  var page = 0;
+  do {
+    final result = await users.query().orderBy('age').paginate(
+          limit: 4,
+          startAfter: cursor,
+          options: const FirestoreOperationOptions(
+            cachePolicy: CachePolicy.networkOnly,
+          ),
+        );
+    page++;
+    print('Page $page: ${result.items.map((u) => u.age).toList()} '
+        'hasMore: ${result.hasMore}');
+    cursor = result.hasMore ? result.cursor : null;
+  } while (cursor != null);
 
-  // ── Cleanup ────────────────────────────────────────────────────────────
-  print('\n═══ CLEANUP ═══');
-  for (int i = 1; i <= 10; i++) {
-    await users.delete('q$i');
+  // ── Streams ───────────────────────────────────────────────────────────
+  print('═══ STREAMS ═══');
+  final first = await users.doc('user-bob').snapshots().first;
+  print('Document stream first value: $first');
+
+  // ── Transactions ──────────────────────────────────────────────────────
+  print('═══ TRANSACTION ═══');
+  final newAge = await firestorePlus.runTransaction<int>((tx) async {
+    final doc = users.doc('user-bob');
+    final user = await tx.get(doc);
+    final age = (user?.age ?? 0) + 1;
+    tx.update(doc, {'age': age});
+    return age;
+  });
+  print('Bob is now $newAge');
+
+  // ── Cleanup ───────────────────────────────────────────────────────────
+  final cleanup = firestorePlus.batch();
+  for (var i = 1; i <= 10; i++) {
+    cleanup.delete(users.doc('q$i'));
   }
-  await users.delete('user-bob');
-  await users.delete('batch1');
-  await users.delete('batch2');
-  print('Cleanup complete');
+  cleanup.delete(users.doc('user-bob'));
+  await cleanup.commit();
+
+  print('═══ DONE — metrics: $metrics ═══');
 }

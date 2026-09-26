@@ -1,7 +1,7 @@
 import 'dart:async';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fake_cloud_firestore/fake_cloud_firestore.dart';
-import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:firestore_plus/firestore_plus.dart';
 
@@ -1161,4 +1161,280 @@ void main() {
       expect(merged.cachePolicy, CachePolicy.networkOnly);
     });
   });
+
+  // =========================================================================
+  // Regression tests for bugs found during real-world integration testing
+  // =========================================================================
+
+  group('Regressions', () {
+    late FakeFirebaseFirestore fake;
+    setUp(() => fake = FakeFirebaseFirestore());
+
+    test('custom loggers only receive messages at or above logLevel', () {
+      final logger = _WarningLogger();
+      logger.debug('d');
+      logger.info('i');
+      logger.warning('w');
+      logger.error('e');
+      expect(logger.messages, ['warning: w', 'error: e']);
+    });
+
+    test('jitter with a 1ms base delay does not throw RangeError', () async {
+      var calls = 0;
+      final result = await RetryExecutor.execute(
+        operation: () async {
+          if (++calls < 3) throw TimeoutException('t');
+          return 'ok';
+        },
+        policy: const RetryPolicy(
+            maxAttempts: 3, initialDelay: Duration(milliseconds: 1)),
+        logger: TestLogger(),
+      );
+      expect(result, 'ok');
+    });
+
+    test('huge attempt counts clamp to maxDelay instead of overflowing',
+        () async {
+      var calls = 0;
+      await RetryExecutor.execute(
+        operation: () async {
+          if (++calls < 1100) throw TimeoutException('t');
+          return null;
+        },
+        policy: const RetryPolicy(
+            maxAttempts: 2000,
+            initialDelay: Duration(milliseconds: 1),
+            maxDelay: Duration.zero,
+            jitter: false),
+        logger: TestLogger(),
+      );
+      expect(calls, 1100);
+    });
+
+    test('retryCount and servedFromCache metrics are accurate', () async {
+      final metrics = TestMetricsListener();
+      final fp = _createFirestore(fake, metricsListener: metrics);
+      final users = _usersCollection(fp);
+      await users.doc('1').set(User(id: '1', name: 'A'));
+      metrics.recorded.clear();
+      const cacheFirst =
+          FirestoreOperationOptions(cachePolicy: CachePolicy.cacheFirst);
+      await users.getById('1', options: cacheFirst);
+      await users.getById('1', options: cacheFirst);
+      expect(metrics.recorded.map((m) => m.servedFromCache), [false, true]);
+
+      final retries = <int>[];
+      var calls = 0;
+      await RetryExecutor.execute(
+        operation: () async {
+          if (++calls < 3) throw TimeoutException('t');
+        },
+        policy: const RetryPolicy(
+            maxAttempts: 3, initialDelay: Duration.zero, jitter: false),
+        logger: TestLogger(),
+        onRetry: retries.add,
+      );
+      expect(retries, [1, 2]);
+    });
+
+    test('a throwing metrics listener does not fail the operation', () async {
+      final fp = FirestorePlus(fake,
+          config: FirestorePlusConfig(
+              logger: TestLogger(), metricsListener: _ThrowingMetrics()));
+      final users = _usersCollection(fp);
+      await users.doc('1').set(User(id: '1', name: 'A'));
+      expect((await users.getById('1'))!.name, 'A');
+    });
+
+    test('writes invalidate cached queries of the collection', () async {
+      final fp = _createFirestore(fake, cachePolicy: CachePolicy.cacheFirst);
+      final users = _usersCollection(fp);
+      await users.doc('1').set(User(id: '1', name: 'A'));
+      expect((await users.get()).length, 1);
+      await users.add(User(id: '', name: 'B'));
+      expect((await users.get()).length, 2);
+      final b = fp.batch()..delete(users.doc('1'));
+      await b.commit();
+      expect((await users.get()).length, 1);
+    });
+
+    test('invalidateCollection also clears cached queries', () async {
+      final store = MemoryCacheStore();
+      final fp = _createFirestore(fake,
+          cachePolicy: CachePolicy.cacheFirst, cacheStore: store);
+      final users = _usersCollection(fp);
+      await users.doc('1').set(User(id: '1', name: 'A'));
+      await users.get();
+      await fake.collection('users').doc('2').set({'name': 'B'});
+      await fp.cache.invalidateCollection('users');
+      expect((await users.get()).length, 2);
+      // store-level clearCollection alone must also drop query keys
+      await store.put('users?q=all', {'docs': []});
+      await store.clearCollection('users');
+      expect(await store.get('users?q=all'), isNull);
+    });
+
+    test('transactions invalidate written documents', () async {
+      final fp = _createFirestore(fake, cachePolicy: CachePolicy.cacheFirst);
+      final users = _usersCollection(fp);
+      await users.doc('1').set(User(id: '1', name: 'A', age: 1));
+      await users.getById('1');
+      await fp.runTransaction<void>((tx) async {
+        final u = await tx.get(users.doc('1'));
+        tx.update(users.doc('1'), {'age': u!.age! + 1});
+      });
+      expect((await users.getById('1'))!.age, 2);
+    });
+
+    test('staleWhileRevalidate cache miss propagates errors', () async {
+      final fp = _createFirestore(fake);
+      final bad = fp.collection<User>('users',
+          fromFirestore: User.fromFirestore,
+          toFirestore: (u) => u.toFirestore());
+      final executor = fp.executor;
+      await expectLater(
+        executor.executeRead(
+          path: 'users/x',
+          cacheKey: 'users/x',
+          options: const FirestoreOperationOptions(
+              cachePolicy: CachePolicy.staleWhileRevalidate),
+          fetchFromNetwork: () async =>
+              throw FirebaseException(plugin: 'x', code: 'permission-denied'),
+        ),
+        throwsA(isA<FirestorePlusException>().having(
+            (e) => e.type, 'type', FirestoreErrorType.permissionDenied)),
+      );
+      expect(bad.path, 'users');
+    });
+
+    test('network "not found" removes a stale cache entry', () async {
+      final fp = _createFirestore(fake, cachePolicy: CachePolicy.networkFirst);
+      final users = _usersCollection(fp);
+      await users.doc('1').set(User(id: '1', name: 'A'));
+      await users.getById('1');
+      await fake.collection('users').doc('1').delete();
+      expect(await users.getById('1'), isNull);
+      expect(
+          await users.getById('1',
+              options: const FirestoreOperationOptions(
+                  cachePolicy: CachePolicy.cacheOnly)),
+          isNull);
+    });
+
+    test('mutating a returned map does not corrupt the cache', () async {
+      final fp = _createFirestore(fake, cachePolicy: CachePolicy.cacheFirst);
+      final raw = fp.collection<Map<String, dynamic>>('raw',
+          fromFirestore: (d, _) => d, toFirestore: (d) => d);
+      await raw.doc('a').set({
+        'n': 1,
+        'l': [1]
+      });
+      final first = (await raw.getById('a'))!;
+      first['n'] = 99;
+      (first['l'] as List).add(2);
+      final second = (await raw.getById('a'))!;
+      expect(second['n'], 1);
+      expect(second['l'], [1]);
+    });
+
+    test('dedupe does not share results across cache policies', () async {
+      final fp = _createFirestore(fake);
+      final users = _usersCollection(fp);
+      await users.doc('1').set(User(id: '1', name: 'A'));
+      final r = await Future.wait([
+        users.getById('1',
+            options: const FirestoreOperationOptions(
+                cachePolicy: CachePolicy.cacheOnly)),
+        users.getById('1',
+            options: const FirestoreOperationOptions(
+                cachePolicy: CachePolicy.networkOnly)),
+      ]);
+      expect(r[0], isNull);
+      expect(r[1]!.name, 'A');
+    });
+
+    test('different Filter queries use different cache keys', () async {
+      final fp = _createFirestore(fake, cachePolicy: CachePolicy.cacheFirst);
+      final users = _usersCollection(fp);
+      for (var i = 0; i < 4; i++) {
+        await users.doc('$i').set(User(id: '$i', name: 'u$i', age: i));
+      }
+      Future<Set<String>> run(int a, int b) async => (await users
+              .query()
+              .where(Filter.or(
+                  Filter('age', isEqualTo: a), Filter('age', isEqualTo: b)))
+              .get())
+          .map((u) => u.id)
+          .toSet();
+      expect(await run(0, 1), {'0', '1'});
+      expect(await run(2, 3), {'2', '3'});
+    });
+
+    test('pagination hasMore is exact and cache holds plain data only',
+        () async {
+      final store = MemoryCacheStore();
+      final fp = _createFirestore(fake,
+          cachePolicy: CachePolicy.networkFirst, cacheStore: store);
+      final users = _usersCollection(fp);
+      for (var i = 0; i < 4; i++) {
+        await users.doc('$i').set(User(id: '$i', name: 'u$i', age: i));
+      }
+      final q = users.query().orderBy('age');
+      final p1 = await q.paginate(limit: 2);
+      expect(p1.hasMore, isTrue);
+      final p2 = await q.paginate(limit: 2, startAfter: p1.cursor);
+      expect(p2.items.map((u) => u.age), [2, 3]);
+      expect(p2.hasMore, isFalse);
+      expect(() => q.paginate(limit: 0), throwsArgumentError);
+    });
+
+    test('toFirestore failures are reported as serialization errors', () async {
+      final fp = _createFirestore(fake);
+      final c = fp.collection<User>('users',
+          fromFirestore: User.fromFirestore,
+          toFirestore: (_) => throw StateError('boom'));
+      await expectLater(
+          c.doc('1').set(User(id: '1', name: 'A')),
+          throwsA(isA<FirestorePlusException>().having(
+              (e) => e.type, 'type', FirestoreErrorType.serialization)));
+    });
+
+    test('transaction read deserialization failure keeps serialization type',
+        () async {
+      final fp = _createFirestore(fake);
+      await fake.collection('users').doc('bad').set({'name': 42});
+      final users = _usersCollection(fp);
+      await expectLater(
+          fp.runTransaction((tx) => tx.get(users.doc('bad'))),
+          throwsA(isA<FirestorePlusException>().having(
+              (e) => e.type, 'type', FirestoreErrorType.serialization)));
+    });
+
+    test('user exceptions inside runTransaction are rethrown unchanged',
+        () async {
+      final fp = _createFirestore(fake);
+      await expectLater(
+          fp.runTransaction<void>((_) async => throw StateError('domain')),
+          throwsStateError);
+    });
+  });
+}
+
+class _ThrowingMetrics implements FirestoreMetricsListener {
+  @override
+  void onOperationComplete(FirestoreOperationMetrics metrics) =>
+      throw StateError('listener bug');
+}
+
+final class _WarningLogger extends FirestorePlusLogger {
+  final List<String> messages = [];
+
+  @override
+  FirestoreLogLevel get logLevel => FirestoreLogLevel.warning;
+
+  @override
+  void log(FirestoreLogLevel level, String message,
+      {Object? error, StackTrace? stackTrace}) {
+    messages.add('${level.name}: $message');
+  }
 }

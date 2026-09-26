@@ -27,7 +27,7 @@ Add `firestore_plus` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  firestore_plus: ^0.0.1
+  firestore_plus: ^0.0.2
 ```
 
 Then run:
@@ -36,13 +36,22 @@ Then run:
 flutter pub get
 ```
 
+Requires Flutter 3.27+ / Dart 3.6+ (the minimum supported by `cloud_firestore` 6.x). `firestore_plus` supports every platform `cloud_firestore` supports (Android, iOS, macOS, web, Windows).
+
+A runnable app that exercises every feature against the Firestore emulator lives in [`example/`](example/).
+
 ## Quick Start
 
 ### Initialization
 
+Initialize Firebase as usual (see the [FlutterFire docs](https://firebase.google.com/docs/flutter/setup)), then wrap the Firestore instance:
+
 ```dart
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firestore_plus/firestore_plus.dart';
+
+await Firebase.initializeApp(/* options */);
 
 final firestorePlus = FirestorePlus(
   FirebaseFirestore.instance,
@@ -59,14 +68,19 @@ final firestorePlus = FirestorePlus(
 class User {
   final String id;
   final String name;
+  final int age;
 
-  User({required this.id, required this.name});
+  User({required this.id, required this.name, this.age = 0});
 
   factory User.fromFirestore(Map<String, dynamic> data, String id) {
-    return User(id: id, name: data['name'] as String);
+    return User(
+      id: id,
+      name: data['name'] as String,
+      age: data['age'] as int? ?? 0,
+    );
   }
 
-  Map<String, dynamic> toFirestore() => {'name': name};
+  Map<String, dynamic> toFirestore() => {'name': name, 'age': age};
 }
 
 final users = firestorePlus.collection<User>(
@@ -82,13 +96,13 @@ final users = firestorePlus.collection<User>(
 // Add
 final newDoc = await users.add(User(id: '', name: 'Alice'));
 
-// Get by ID
+// Get by ID (returns null if the document does not exist)
 final user = await users.getById(newDoc.id);
 
 // Set (with specific ID)
 await users.doc('user-1').set(User(id: 'user-1', name: 'Bob'));
 
-// Update
+// Update (throws FirestorePlusException of type notFound if missing)
 await users.doc(newDoc.id).update({'name': 'Alice Updated'});
 
 // Check existence
@@ -112,7 +126,19 @@ final results = await users
   .get();
 ```
 
-Supported query operations: `where`, `whereIn`, `whereNotIn`, `arrayContains`, `arrayContainsAny`, `isNull`, `isEqualTo`, `isNotEqualTo`, `isGreaterThan`, `isGreaterThanOrEqualTo`, `isLessThan`, `isLessThanOrEqualTo`, `orderBy`, `limit`, `limitToLast`, `startAt`, `startAfter`, `endAt`, `endBefore`.
+Supported query operations: `where`, `whereIn`, `whereNotIn`, `arrayContains`, `arrayContainsAny`, `isNull`, `isEqualTo`, `isNotEqualTo`, `isGreaterThan`, `isGreaterThanOrEqualTo`, `isLessThan`, `isLessThanOrEqualTo`, `orderBy`, `limit`, `limitToLast`, `startAt`, `startAfter`, `endAt`, `endBefore`, `startAtDocument`, `startAfterDocument`, `endAtDocument`, `endBeforeDocument`, `count`.
+
+Composite `OR` queries use the native `Filter` class:
+
+```dart
+final result = await users
+  .query()
+  .where(Filter.or(
+    Filter('age', isLessThan: 18),
+    Filter('age', isGreaterThan: 65),
+  ))
+  .get();
+```
 
 **Native query escape hatch**: Access the underlying `Query` via `query.nativeQuery` at any time.
 
@@ -137,7 +163,9 @@ final user = await users.getById('someId',
 | `cacheFirst` | Return cached data if available; otherwise fetch from network. |
 | `cacheOnly` | Return cached data only; never fetch from network. |
 | `networkFirst` | Fetch from network; if it fails, fall back to cache. |
-| `staleWhileRevalidate` | Return cached data immediately; refresh in the background. |
+| `staleWhileRevalidate` | Return cached data immediately; refresh in the background. On a cache miss, behaves like a normal network read (errors are thrown). |
+
+The default policy is `networkFirst`. By default cache entries have no TTL (`defaultCacheDuration: null`) and live until evicted, invalidated or overwritten.
 
 ### TTL
 
@@ -164,7 +192,9 @@ await firestorePlus.cache.invalidateCollection('users');
 await firestorePlus.cache.clear();
 ```
 
-Writes (`set`, `update`, `delete`) automatically invalidate the cache for the affected document.
+Writes made through `firestore_plus` (`add`, `set`, `update`, `delete`, batches and transactions) automatically invalidate the cached document **and** the cached query results of its collection. Writes made outside the package (native SDK, other devices, Cloud Functions) are not observed — use TTLs, `networkFirst`, or streams for data that changes remotely.
+
+If a document no longer exists on the server, its cache entry is removed on the next network read.
 
 ## Retry
 
@@ -205,25 +235,32 @@ RetryPolicy(
 )
 ```
 
-**Non-retryable errors** (never retried by default): `permissionDenied`, `notFound`, `invalidArgument`, `alreadyExists`, `cancelled`.
+`maxAttempts` is the number of **retries** after the first attempt, so `maxAttempts: 3` means up to 4 attempts in total.
+
+**Retryable errors** (by default): `network`, `unavailable`, `timeout`, `resourceExhausted`.
+**Non-retryable errors** (never retried by default): `permissionDenied`, `notFound`, `invalidArgument`, `alreadyExists`, `cancelled`, `serialization`, `unknown`.
+
+**Writes and timeouts:** a write that times out is still queued by Firestore and may commit later. To avoid applying it twice (for example a `FieldValue.increment`), `set`, `update`, `delete` and `add` do **not** retry timeouts by default. Supply your own `retryIf` if you want different behaviour.
 
 ## Error Handling
 
-All errors are normalized into `FirestorePlusException`:
+Firestore errors from reads, writes, queries, streams, batches and transactions are normalized into `FirestorePlusException`:
 
 ```dart
 try {
-  await users.getById('missing');
+  await users.getById('user-1');
 } on FirestorePlusException catch (e) {
-  print(e.type);               // FirestoreErrorType.notFound
+  print(e.type);               // e.g. FirestoreErrorType.permissionDenied
   print(e.message);            // descriptive message
-  print(e.code);               // original Firebase error code
-  print(e.operation);          // 'GET users/missing'
-  print(e.path);               // 'users/missing'
+  print(e.code);               // original Firebase error code, e.g. 'permission-denied'
+  print(e.operation);          // 'GET users/user-1'
+  print(e.path);               // 'users/user-1'
   print(e.originalException);  // the original FirebaseException
   print(e.stackTrace);         // original stack trace
 }
 ```
+
+A missing document is **not** an error: `get`/`getById` return `null`. `update` on a missing document throws with type `notFound`. Exceptions you throw yourself inside `runTransaction` are rethrown unchanged.
 
 Error types: `network`, `unavailable`, `timeout`, `permissionDenied`, `notFound`, `invalidArgument`, `alreadyExists`, `cancelled`, `resourceExhausted`, `serialization`, `unknown`.
 
@@ -285,7 +322,7 @@ const FirestorePlusConfig(
 )
 ```
 
-Timeout errors throw `FirestorePlusException` with `FirestoreErrorType.timeout`.
+Timeout errors throw `FirestorePlusException` with `FirestoreErrorType.timeout`. The timeout applies to each attempt, so with retries the total time can exceed it. Batches and transactions use native Firestore semantics (`runTransaction` has its own `timeout` parameter).
 
 ## Pagination
 
@@ -309,7 +346,7 @@ if (page1.hasMore && page1.cursor != null) {
 }
 ```
 
-`PaginatedResult<T>` provides: `items`, `hasMore`, `cursor`.
+`PaginatedResult<T>` provides: `items`, `hasMore`, `cursor`. `hasMore` is exact: the query fetches `limit + 1` documents to find out whether another page exists. `limit` must be greater than 0.
 
 ## Streams
 
@@ -332,7 +369,7 @@ queryStream.listen((List<User> users) {
 });
 ```
 
-Serialization errors in streams are caught, logged, and propagated as `FirestorePlusException`.
+Stream errors (e.g. `permission-denied`) and serialization errors are emitted as `FirestorePlusException`. Streams are not cached. Cancel your subscriptions (or let `StreamBuilder` do it) when a widget is disposed.
 
 ## Batch Operations
 
@@ -359,7 +396,7 @@ await firestorePlus.runTransaction<void>((tx) async {
 });
 ```
 
-Firestore transaction semantics are preserved. No unsafe retry logic is added on top of native transaction retries. Access the native `Transaction` via `tx.nativeTransaction`.
+Firestore transaction semantics are preserved. No unsafe retry logic is added on top of native transaction retries. Documents written in the transaction are invalidated in the cache once it commits. Access the native `Transaction` via `tx.nativeTransaction`.
 
 ## Request Deduplication
 
@@ -404,6 +441,8 @@ final firestorePlus = FirestorePlus(
 
 `FirestoreOperationMetrics` provides: `type`, `path`, `duration`, `servedFromCache`, `isSuccess`, `retryCount`, `error`.
 
+Metrics are emitted for document reads, query reads (`type: get`), `set`/`update`/`delete` (`add` is reported as `set`), `exists` and `count`. Batches, transactions and streams do not emit metrics. An exception thrown by your listener is logged and never fails the operation.
+
 Metrics remain local. Nothing is sent externally.
 
 ## Custom Cache Store
@@ -436,7 +475,9 @@ final firestorePlus = FirestorePlus(
 );
 ```
 
-The built-in `MemoryCacheStore` supports configurable `maxSize` (default 500 entries) with LRU eviction.
+Keys are either a document path (`users/u1`) or a query key starting with `<collection>?` (e.g. `users?q=...`). `clearCollection('users')` must remove keys starting with `users/` and `users?`. Values are raw Firestore data and may contain `Timestamp`, `GeoPoint`, `DocumentReference` or `Blob` — a persistent store must encode these itself.
+
+The built-in `MemoryCacheStore` supports configurable `maxSize` (default 500 entries) with LRU eviction, and copies values so mutating a returned object never corrupts the cache.
 
 ## Testing
 
@@ -445,6 +486,7 @@ The package is designed for testability. Use `fake_cloud_firestore` for unit tes
 ```dart
 import 'package:fake_cloud_firestore/fake_cloud_firestore.dart';
 import 'package:firestore_plus/firestore_plus.dart';
+import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('example test', () async {
@@ -523,8 +565,9 @@ No. Security rules are the responsibility of your Firebase project.
 ## Limitations
 
 - Subcollections are not directly modeled — use `firestore.collection<T>('parent/docId/subcollection', ...)`.
-- `staleWhileRevalidate` background fetch errors are logged but not propagated to the caller.
-- Pagination cursor caching requires careful policy selection (prefer `networkOnly` or `networkFirst`).
+- `staleWhileRevalidate` background fetch errors (on a cache hit) are logged but not propagated to the caller.
+- When a paginated page is served from the application cache, the cursor is rebuilt by reading the last document (from Firestore's local cache when possible).
+- The application cache only sees writes made through `firestore_plus`.
 - `fake_cloud_firestore` has limited support for `startAfterDocument` pagination in tests.
 
 ## Roadmap

@@ -8,6 +8,8 @@ abstract base class FirestorePlusLogger {
   FirestoreLogLevel get logLevel;
 
   /// Logs a message at the given [level].
+  ///
+  /// The package only calls this for messages at or above [logLevel].
   void log(
     FirestoreLogLevel level,
     String message, {
@@ -15,11 +17,24 @@ abstract base class FirestorePlusLogger {
     StackTrace? stackTrace,
   });
 
+  /// Whether messages at [level] pass the [logLevel] threshold.
+  bool isEnabled(FirestoreLogLevel level) => level.index >= logLevel.index;
+
+  void _logIfEnabled(
+    FirestoreLogLevel level,
+    String message, {
+    Object? error,
+    StackTrace? stackTrace,
+  }) {
+    if (!isEnabled(level)) return;
+    log(level, message, error: error, stackTrace: stackTrace);
+  }
+
   /// Logs a debug message.
-  void debug(String message) => log(FirestoreLogLevel.debug, message);
+  void debug(String message) => _logIfEnabled(FirestoreLogLevel.debug, message);
 
   /// Logs an info message.
-  void info(String message) => log(FirestoreLogLevel.info, message);
+  void info(String message) => _logIfEnabled(FirestoreLogLevel.info, message);
 
   /// Logs a warning message.
   void warning(
@@ -27,7 +42,7 @@ abstract base class FirestorePlusLogger {
     Object? error,
     StackTrace? stackTrace,
   }) =>
-      log(
+      _logIfEnabled(
         FirestoreLogLevel.warning,
         message,
         error: error,
@@ -40,7 +55,7 @@ abstract base class FirestorePlusLogger {
     Object? error,
     StackTrace? stackTrace,
   }) =>
-      log(
+      _logIfEnabled(
         FirestoreLogLevel.error,
         message,
         error: error,

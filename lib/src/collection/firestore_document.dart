@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../core/firestore_operation_options.dart';
@@ -34,6 +36,8 @@ class FirestoreDocument<T> {
   String get path => nativeRef.path;
 
   /// Gets the document, optionally applying [options].
+  ///
+  /// Returns `null` when the document does not exist.
   Future<T?> get({FirestoreOperationOptions? options}) async {
     final data = await firestore.executor.executeRead(
       path: path,
@@ -51,15 +55,13 @@ class FirestoreDocument<T> {
     try {
       return fromFirestore(data, id);
     } catch (e, st) {
-      throw ErrorMapper.map(
-        FirestorePlusException(
-          type: FirestoreErrorType.serialization,
-          message: 'Failed to deserialize document: $e',
-          originalException: e,
-          stackTrace: st,
-          operation: 'GET $path',
-          path: path,
-        ),
+      throw FirestorePlusException(
+        type: FirestoreErrorType.serialization,
+        message: 'Failed to deserialize document: $e',
+        originalException: e,
+        stackTrace: st,
+        operation: 'GET $path',
+        path: path,
       );
     }
   }
@@ -67,30 +69,45 @@ class FirestoreDocument<T> {
   /// Sets the document [data], optionally applying [options].
   Future<void> set(T data,
       {SetOptions? setOptions, FirestoreOperationOptions? options}) async {
+    final Map<String, dynamic> serialized;
+    try {
+      serialized = toFirestore(data);
+    } catch (e, st) {
+      throw FirestorePlusException(
+        type: FirestoreErrorType.serialization,
+        message: 'Failed to serialize document: $e',
+        originalException: e,
+        stackTrace: st,
+        operation: 'SET $path',
+        path: path,
+      );
+    }
     await firestore.executor.executeWrite(
       path: path,
       type: FirestoreOperationType.set,
       options: options,
+      retryOnTimeout: false,
       operation: () async {
-        final serialized = toFirestore(data);
         await nativeRef.set(serialized, setOptions);
-        // Invalidate cache after write
-        await firestore.cache.invalidate(path);
+        await firestore.cache.invalidateDocument(path);
       },
     );
   }
 
   /// Updates the document with the given [data], optionally applying [options].
+  ///
+  /// Throws a [FirestorePlusException] of type [FirestoreErrorType.notFound]
+  /// if the document does not exist.
   Future<void> update(Map<String, dynamic> data,
       {FirestoreOperationOptions? options}) async {
     await firestore.executor.executeWrite(
       path: path,
       type: FirestoreOperationType.update,
       options: options,
+      retryOnTimeout: false,
       operation: () async {
         await nativeRef.update(data);
-        // Invalidate cache after write
-        await firestore.cache.invalidate(path);
+        await firestore.cache.invalidateDocument(path);
       },
     );
   }
@@ -101,10 +118,10 @@ class FirestoreDocument<T> {
       path: path,
       type: FirestoreOperationType.delete,
       options: options,
+      retryOnTimeout: false,
       operation: () async {
         await nativeRef.delete();
-        // Invalidate cache after write
-        await firestore.cache.invalidate(path);
+        await firestore.cache.invalidateDocument(path);
       },
     );
   }
@@ -128,7 +145,11 @@ class FirestoreDocument<T> {
   }
 
   /// A typed stream of document snapshots.
+  ///
+  /// Emits `null` while the document does not exist. Errors (including
+  /// deserialization failures) are emitted as [FirestorePlusException].
   Stream<T?> snapshots() {
+    final operation = 'STREAM GET $path';
     return nativeRef.snapshots().map((snap) {
       if (!snap.exists || snap.data() == null) return null;
       try {
@@ -138,19 +159,18 @@ class FirestoreDocument<T> {
             'Failed to deserialize stream document: $e',
             error: e,
             stackTrace: st);
-        // Depending on design we might yield null or throw an error to the stream.
-        // Rethrowing allows stream listeners to handle the error properly.
-        throw ErrorMapper.map(
-          FirestorePlusException(
-            type: FirestoreErrorType.serialization,
-            message: 'Failed to deserialize document stream: $e',
-            originalException: e,
-            stackTrace: st,
-            operation: 'STREAM GET $path',
-            path: path,
-          ),
+        throw FirestorePlusException(
+          type: FirestoreErrorType.serialization,
+          message: 'Failed to deserialize document stream: $e',
+          originalException: e,
+          stackTrace: st,
+          operation: operation,
+          path: path,
         );
       }
-    });
+    }).transform(
+        StreamTransformer<T?, T?>.fromHandlers(handleError: (e, st, sink) {
+      sink.addError(ErrorMapper.map(e, st, operation, path), st);
+    }));
   }
 }
