@@ -42,7 +42,7 @@ class FirestorePlusException implements Exception {
   /// A descriptive error message.
   final String message;
 
-  /// The original exception (e.g., [FirebaseException]).
+  /// The original exception (e.g., `FirebaseException`).
   final Object? originalException;
 
   /// The stack trace where the error occurred.
@@ -54,9 +54,10 @@ class FirestorePlusException implements Exception {
   /// The path of the document or collection involved.
   final String? path;
 
-  /// The error code, usually mapping to the original [FirebaseException.code].
+  /// The error code, usually mapping to the original `FirebaseException.code`.
   final String? code;
 
+  /// Creates an exception. Normally produced by `ErrorMapper.map`.
   const FirestorePlusException({
     required this.type,
     required this.message,

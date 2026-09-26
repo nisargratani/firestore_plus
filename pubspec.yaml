@@ -1,6 +1,6 @@
 name: firestore_plus
 description: "Production-ready Firestore utilities for Flutter — caching, retry, error handling, pagination, logging, transactions, batch operations and more."
-version: 0.0.2
+version: 0.0.3
 homepage: https://github.com/nisargratani/firestore_plus
 repository: https://github.com/nisargratani/firestore_plus
 issue_tracker: https://github.com/nisargratani/firestore_plus/issues

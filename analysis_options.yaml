@@ -1,7 +1,19 @@
 analyzer:
   exclude:
     - build/**
+    - example/**
+
 include: package:flutter_lints/flutter.yaml
 
-# Additional information about this file can be found at
-# https://dart.dev/guides/language/analysis-options
+linter:
+  rules:
+    - unawaited_futures
+    - discarded_futures
+    - avoid_dynamic_calls
+    - cancel_subscriptions
+    - close_sinks
+    - only_throw_errors
+    - always_declare_return_types
+    - use_rethrow_when_possible
+    - prefer_final_fields
+    - test_types_in_equals

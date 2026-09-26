@@ -17,6 +17,8 @@ class CacheManager {
   /// they can be invalidated when a document in that collection is written.
   final Map<String, Set<String>> _queryKeys = {};
 
+  /// Creates a manager over a cache store. Every `FirestorePlus` creates its
+  /// own, available as `FirestorePlus.cache`.
   CacheManager(this._store, this._logger);
 
   /// Executes an operation with caching logic applied.

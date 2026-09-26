@@ -16,6 +16,8 @@ class FirestoreTransaction {
 
   final Set<String> _writtenPaths = {};
 
+  /// Wraps [nativeTransaction]. Instances are passed to the callback of
+  /// [FirestorePlus.runTransaction].
   FirestoreTransaction(this.nativeTransaction, this.firestore);
 
   /// Paths written in this transaction; invalidated in the cache after the

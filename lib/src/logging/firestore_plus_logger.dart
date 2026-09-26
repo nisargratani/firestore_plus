@@ -2,6 +2,7 @@ import 'log_level.dart';
 
 /// Abstract base class for a logger used by FirestorePlus.
 abstract base class FirestorePlusLogger {
+  /// Const constructor for subclasses.
   const FirestorePlusLogger();
 
   /// The current log level threshold.
@@ -68,6 +69,7 @@ final class ConsoleFirestoreLogger extends FirestorePlusLogger {
   @override
   final FirestoreLogLevel logLevel;
 
+  /// Creates a logger that prints messages at or above [logLevel].
   const ConsoleFirestoreLogger({this.logLevel = FirestoreLogLevel.info});
 
   @override

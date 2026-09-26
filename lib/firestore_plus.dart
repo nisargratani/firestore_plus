@@ -1,3 +1,19 @@
+/// Production-ready utilities on top of `cloud_firestore`: typed
+/// collections, application-level caching with policies and TTL, retry with
+/// backoff, timeouts, normalized errors, request deduplication, pagination,
+/// batches, transactions, logging and metrics.
+///
+/// Start by wrapping a `FirebaseFirestore` instance in a `FirestorePlus`:
+///
+/// ```dart
+/// final firestorePlus = FirestorePlus(FirebaseFirestore.instance);
+/// final users = firestorePlus.collection<User>(
+///   'users',
+///   fromFirestore: User.fromFirestore,
+///   toFirestore: (user) => user.toFirestore(),
+/// );
+/// final user = await users.getById('user-1'); // null if missing
+/// ```
 library;
 
 // Core

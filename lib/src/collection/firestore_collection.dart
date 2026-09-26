@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../core/firestore_operation_options.dart';
 import '../core/firestore_plus.dart';
+import '../metrics/firestore_metrics.dart';
 import 'firestore_document.dart';
 import 'firestore_query.dart';
 
@@ -13,12 +14,16 @@ class FirestoreCollection<T> {
   /// The [FirestorePlus] instance.
   final FirestorePlus firestore;
 
-  /// The serialization mapper.
+  /// Converts raw document data (and its ID) into a [T] when reading.
   final T Function(Map<String, dynamic> data, String id) fromFirestore;
 
-  /// The deserialization mapper.
+  /// Converts a [T] into raw document data when writing.
   final Map<String, dynamic> Function(T instance) toFirestore;
 
+  /// Creates a typed collection reference.
+  ///
+  /// Usually obtained from [FirestorePlus.collection] rather than constructed
+  /// directly.
   FirestoreCollection(
     this.nativeRef,
     this.firestore,
@@ -43,12 +48,15 @@ class FirestoreCollection<T> {
     );
   }
 
-  /// Adds a new document with the given [data], returning a reference to it.
+  /// Adds a new document with an auto-generated ID, returning a reference
+  /// to it.
+  ///
+  /// The ID is generated client-side, so a retried write targets the same
+  /// document instead of creating duplicates.
   Future<FirestoreDocument<T>> add(T data,
       {FirestoreOperationOptions? options}) async {
-    final ref = nativeRef.doc();
-    final docRef = doc(ref.id);
-    await docRef.set(data, options: options);
+    final docRef = doc();
+    await docRef.writeAs(FirestoreOperationType.add, data, options: options);
     return docRef;
   }
 

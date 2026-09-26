@@ -1,6 +1,7 @@
 /// Configuration for retrying failed operations.
 class RetryPolicy {
-  /// The maximum number of retry attempts.
+  /// The maximum number of retries after the first attempt (so up to
+  /// `maxAttempts + 1` attempts in total).
   final int maxAttempts;
 
   /// The initial delay before the first retry.
@@ -21,6 +22,9 @@ class RetryPolicy {
   /// Return `true` to retry, `false` to throw immediately.
   final bool Function(Object error)? retryIf;
 
+  /// Creates a retry policy. The delay before retry `n` is
+  /// `initialDelay * backoffMultiplier^(n - 1)`, capped at [maxDelay], and
+  /// randomized to 50–100% of that value when [jitter] is true.
   const RetryPolicy({
     this.maxAttempts = 3,
     this.initialDelay = const Duration(milliseconds: 500),

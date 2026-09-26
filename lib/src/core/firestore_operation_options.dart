@@ -15,6 +15,8 @@ class FirestoreOperationOptions {
   /// The timeout for the operation. Overrides the global default if provided.
   final Duration? timeout;
 
+  /// Creates per-operation options. Any `null` field falls back to the
+  /// global `FirestorePlusConfig` default.
   const FirestoreOperationOptions({
     this.cachePolicy,
     this.cacheDuration,

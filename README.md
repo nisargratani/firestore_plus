@@ -27,7 +27,7 @@ Add `firestore_plus` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  firestore_plus: ^0.0.2
+  firestore_plus: ^0.0.3
 ```
 
 Then run:
@@ -441,7 +441,7 @@ final firestorePlus = FirestorePlus(
 
 `FirestoreOperationMetrics` provides: `type`, `path`, `duration`, `servedFromCache`, `isSuccess`, `retryCount`, `error`.
 
-Metrics are emitted for document reads, query reads (`type: get`), `set`/`update`/`delete` (`add` is reported as `set`), `exists` and `count`. Batches, transactions and streams do not emit metrics. An exception thrown by your listener is logged and never fails the operation.
+Metrics are emitted for document reads (`get`), query reads and pagination (`query`), `add`, `set`, `update`, `delete`, `exists` and `count`. Batches, transactions and streams do not emit metrics. An exception thrown by your listener is logged and never fails the operation.
 
 Metrics remain local. Nothing is sent externally.
 
@@ -475,7 +475,7 @@ final firestorePlus = FirestorePlus(
 );
 ```
 
-Keys are either a document path (`users/u1`) or a query key starting with `<collection>?` (e.g. `users?q=...`). `clearCollection('users')` must remove keys starting with `users/` and `users?`. Values are raw Firestore data and may contain `Timestamp`, `GeoPoint`, `DocumentReference` or `Blob` — a persistent store must encode these itself.
+Keys are either a document path (`users/u1`) or a query key starting with `<collection>?` (e.g. `users?q=...`). Writes invalidate query keys created during the current app session; query results persisted by a previous session are not tracked, so give them a TTL or call `invalidateCollection` at startup. `clearCollection('users')` must remove keys starting with `users/` and `users?`. Values are raw Firestore data and may contain `Timestamp`, `GeoPoint`, `DocumentReference` or `Blob` — a persistent store must encode these itself.
 
 The built-in `MemoryCacheStore` supports configurable `maxSize` (default 500 entries) with LRU eviction, and copies values so mutating a returned object never corrupts the cache.
 
@@ -572,12 +572,12 @@ No. Security rules are the responsibility of your Firebase project.
 
 ## Roadmap
 
-- [ ] Aggregate query support (sum, average)
-- [ ] Subcollection helper API
-- [ ] Offline queue for pending writes
-- [ ] Built-in rate limiting
-- [ ] Cache statistics dashboard
-- [ ] Hive/SQLite cache store packages
+- Aggregate query support (sum, average)
+- Subcollection helper API
+- Offline queue for pending writes
+- Built-in rate limiting
+- Cache statistics dashboard
+- Hive/SQLite cache store packages
 
 ## Contributing
 

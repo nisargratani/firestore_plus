@@ -1170,6 +1170,22 @@ void main() {
     late FakeFirebaseFirestore fake;
     setUp(() => fake = FakeFirebaseFirestore());
 
+    test('metrics report add and query operation types', () async {
+      final metrics = TestMetricsListener();
+      final fp = _createFirestore(fake, metricsListener: metrics);
+      final users = _usersCollection(fp);
+      await users.add(User(id: '', name: 'A'));
+      await users.get();
+      await users.query().orderBy('name').paginate(limit: 1);
+      await users.getById('missing');
+      expect(metrics.recorded.map((m) => m.type).toList(), [
+        FirestoreOperationType.add,
+        FirestoreOperationType.query,
+        FirestoreOperationType.query,
+        FirestoreOperationType.get,
+      ]);
+    });
+
     test('custom loggers only receive messages at or above logLevel', () {
       final logger = _WarningLogger();
       logger.debug('d');

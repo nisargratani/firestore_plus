@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:meta/meta.dart';
 
 import '../core/firestore_operation_options.dart';
 import '../core/firestore_plus.dart';
@@ -16,12 +17,16 @@ class FirestoreDocument<T> {
   /// The [FirestorePlus] instance.
   final FirestorePlus firestore;
 
-  /// The serialization mapper.
+  /// Converts raw document data (and its ID) into a [T] when reading.
   final T Function(Map<String, dynamic> data, String id) fromFirestore;
 
-  /// The deserialization mapper.
+  /// Converts a [T] into raw document data when writing.
   final Map<String, dynamic> Function(T instance) toFirestore;
 
+  /// Creates a typed document reference.
+  ///
+  /// Usually obtained from `FirestoreCollection.doc` rather than constructed
+  /// directly.
   FirestoreDocument(
     this.nativeRef,
     this.firestore,
@@ -67,7 +72,18 @@ class FirestoreDocument<T> {
   }
 
   /// Sets the document [data], optionally applying [options].
+  ///
+  /// Pass [setOptions] (e.g. `SetOptions(merge: true)`) to merge instead of
+  /// overwrite. Invalidates the cached document and its collection's cached
+  /// queries on success.
   Future<void> set(T data,
+          {SetOptions? setOptions, FirestoreOperationOptions? options}) =>
+      writeAs(FirestoreOperationType.set, data,
+          setOptions: setOptions, options: options);
+
+  /// Implementation of [set] that reports [type] in metrics.
+  @internal
+  Future<void> writeAs(FirestoreOperationType type, T data,
       {SetOptions? setOptions, FirestoreOperationOptions? options}) async {
     final Map<String, dynamic> serialized;
     try {
@@ -78,13 +94,13 @@ class FirestoreDocument<T> {
         message: 'Failed to serialize document: $e',
         originalException: e,
         stackTrace: st,
-        operation: 'SET $path',
+        operation: '${type.name.toUpperCase()} $path',
         path: path,
       );
     }
     await firestore.executor.executeWrite(
       path: path,
-      type: FirestoreOperationType.set,
+      type: type,
       options: options,
       retryOnTimeout: false,
       operation: () async {

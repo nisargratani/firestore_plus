@@ -18,17 +18,23 @@ class FirestoreOperationExecutor {
   final CacheManager cacheManager;
   final Map<String, Future<_ReadResult>> _activeReadRequests = {};
 
+  /// Creates an executor. Internal to `FirestorePlus`; not intended for
+  /// direct use.
   FirestoreOperationExecutor({
     required this.config,
     required this.cacheManager,
   });
 
   /// Executes a read operation that returns data capable of being cached.
+  ///
+  /// [type] is reported in metrics: [FirestoreOperationType.get] for document
+  /// reads, [FirestoreOperationType.query] for query reads.
   Future<Map<String, dynamic>?> executeRead({
     required String path,
     required String cacheKey,
     required FirestoreOperationOptions? options,
     required Future<Map<String, dynamic>?> Function() fetchFromNetwork,
+    FirestoreOperationType type = FirestoreOperationType.get,
   }) async {
     final mergedOptions = FirestoreOperationOptions(
       cachePolicy: config.defaultCachePolicy,
@@ -41,7 +47,7 @@ class FirestoreOperationExecutor {
     final stopwatch = Stopwatch()..start();
     bool servedFromCache = false;
     int retries = 0;
-    Object? finalError;
+    FirestorePlusException? finalError;
 
     try {
       Future<Map<String, dynamic>?> executeWithRetry() {
@@ -81,9 +87,10 @@ class FirestoreOperationExecutor {
               .debug('Deduplicating identical read request for $cacheKey');
           result = await inFlight;
         } else {
-          final future = fetch().whenComplete(() {
-            _activeReadRequests.remove(dedupeKey);
-          });
+          // The removed value is this same in-flight future; it must not be
+          // returned (whenComplete would wait on itself), only dropped.
+          final future = fetch().whenComplete(
+              () => unawaited(_activeReadRequests.remove(dedupeKey)));
           _activeReadRequests[dedupeKey] = future;
           result = await future;
         }
@@ -92,12 +99,13 @@ class FirestoreOperationExecutor {
       servedFromCache = result.source != DataSource.network;
       return result.data;
     } catch (e, st) {
-      finalError = ErrorMapper.map(e, st, operationName, path);
-      throw finalError;
+      final mapped = ErrorMapper.map(e, st, operationName, path);
+      finalError = mapped;
+      throw mapped;
     } finally {
       stopwatch.stop();
       _emitMetrics(
-        type: FirestoreOperationType.get,
+        type: type,
         path: path,
         duration: stopwatch.elapsed,
         servedFromCache: servedFromCache,
@@ -129,7 +137,7 @@ class FirestoreOperationExecutor {
     final operationName = '${type.name.toUpperCase()} $path';
     final stopwatch = Stopwatch()..start();
     int retries = 0;
-    Object? finalError;
+    FirestorePlusException? finalError;
 
     var policy = mergedOptions.retryPolicy!;
     if (!retryOnTimeout && policy.retryIf == null) {
@@ -158,8 +166,9 @@ class FirestoreOperationExecutor {
         onRetry: (n) => retries = n,
       );
     } catch (e, st) {
-      finalError = ErrorMapper.map(e, st, operationName, path);
-      throw finalError;
+      final mapped = ErrorMapper.map(e, st, operationName, path);
+      finalError = mapped;
+      throw mapped;
     } finally {
       stopwatch.stop();
       _emitMetrics(

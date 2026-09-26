@@ -5,6 +5,7 @@ class PaginationCursor {
   /// The document snapshot representing the cursor position.
   final DocumentSnapshot document;
 
+  /// Creates a cursor positioned after [document].
   const PaginationCursor(this.document);
 }
 
@@ -19,6 +20,7 @@ class PaginatedResult<T> {
   /// The cursor to use for fetching the next page.
   final PaginationCursor? cursor;
 
+  /// Creates a page of results.
   const PaginatedResult({
     required this.items,
     required this.hasMore,

@@ -14,6 +14,7 @@ class CacheEntry<T> {
   /// The source from which this data was originally obtained.
   final DataSource source;
 
+  /// Creates a cache entry. [expiresAt] of `null` means it never expires.
   const CacheEntry({
     required this.data,
     required this.createdAt,

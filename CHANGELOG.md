@@ -1,3 +1,37 @@
+## 0.0.3
+
+### Bug fixes
+
+* Metrics: `add()` now reports `FirestoreOperationType.add` (was `set`), and
+  query reads (`FirestoreQuery.get`, `FirestoreCollection.get`, `paginate`)
+  report `FirestoreOperationType.query` (was `get`). Both enum values existed
+  but were never emitted.
+* Docs for `fromFirestore` / `toFirestore` on `FirestoreCollection` and
+  `FirestoreDocument` described them the wrong way round.
+
+### Documentation
+
+* DartDoc for the library, all public constructors and every
+  `FirestoreOperationType` value; `dart doc` reports no warnings.
+* `RetryPolicy` documents the backoff formula and that `maxAttempts` counts
+  retries after the first attempt.
+* README: metrics types, and that query results persisted by a previous app
+  session are not tracked for write invalidation (use a TTL or
+  `invalidateCollection`).
+
+### Tooling
+
+* GitHub Actions CI: format, analyze, test, example analysis, publish dry-run,
+  and a job at dependency lower bounds.
+* Additional lints for async safety (`unawaited_futures`,
+  `discarded_futures`, `cancel_subscriptions`, `close_sinks`, …).
+
+### Behaviour change to note
+
+* Metrics listeners that filter on `FirestoreOperationType.get` or `.set`
+  will no longer see query reads or `add()` calls there; handle `.query` and
+  `.add` as well.
+
 ## 0.0.2
 
 Fixes found by integration-testing the package from a fresh consumer app

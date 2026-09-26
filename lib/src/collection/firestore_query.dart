@@ -50,6 +50,8 @@ class FirestoreQuery<T> {
     return jsonEncode(v.toString());
   }
 
+  /// Creates a typed query. Usually obtained from
+  /// `FirestoreCollection.query` rather than constructed directly.
   FirestoreQuery({
     required this.nativeQuery,
     required this.firestore,
@@ -187,6 +189,7 @@ class FirestoreQuery<T> {
   Future<List<T>> get({FirestoreOperationOptions? options}) async {
     final rawData = await firestore.executor.executeRead(
       path: collectionPath,
+      type: FirestoreOperationType.query,
       cacheKey: _cacheKey,
       options: options,
       fetchFromNetwork: () async {
@@ -233,6 +236,7 @@ class FirestoreQuery<T> {
     DocumentSnapshot? lastSnap;
     final rawData = await firestore.executor.executeRead(
       path: collectionPath,
+      type: FirestoreOperationType.query,
       cacheKey: pageCacheKey,
       options: options,
       fetchFromNetwork: () async {

@@ -18,6 +18,7 @@ class FirestoreBatch {
   /// The paths that will be invalidated in cache after a successful commit.
   final Set<String> _pathsToInvalidate = {};
 
+  /// Wraps [nativeBatch]. Usually obtained from [FirestorePlus.batch].
   FirestoreBatch(this.nativeBatch, this.firestore);
 
   /// Writes to the document referred to by [doc]. If the document does not exist yet, it will be created.

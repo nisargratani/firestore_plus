@@ -30,6 +30,9 @@ class FirestorePlusConfig {
   /// An optional listener for metrics.
   final FirestoreMetricsListener? metricsListener;
 
+  /// Creates a configuration. Defaults: `networkFirst` caching with no TTL,
+  /// exponential retry (3 retries), a 30 second timeout, deduplication on,
+  /// an in-memory cache of 500 entries and an info-level console logger.
   const FirestorePlusConfig({
     this.defaultCachePolicy = CachePolicy.networkFirst,
     this.defaultCacheDuration,
