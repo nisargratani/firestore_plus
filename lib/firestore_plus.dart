@@ -12,6 +12,7 @@ export 'src/collection/firestore_document.dart';
 export 'src/collection/firestore_query.dart';
 
 // Cache
+export 'src/cache/cache_manager.dart';
 export 'src/cache/cache_store.dart';
 export 'src/cache/memory_cache_store.dart';
 export 'src/cache/cache_policy.dart';

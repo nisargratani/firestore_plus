@@ -3,9 +3,11 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../collection/firestore_document.dart';
 import '../core/firestore_plus.dart';
 import '../error/error_mapper.dart';
-import '../error/firestore_plus_exception.dart';
 
 /// A typed wrapper for a Firestore WriteBatch.
+///
+/// Batches use native Firestore semantics: no application-level retry or
+/// timeout is applied to [commit].
 class FirestoreBatch {
   /// The native WriteBatch.
   final WriteBatch nativeBatch;
@@ -38,24 +40,18 @@ class FirestoreBatch {
   }
 
   /// Commits all of the writes in this write batch as a single atomic unit.
+  ///
+  /// Failures are thrown as [FirestorePlusException] carrying the real error
+  /// type (e.g. `permissionDenied`, `notFound`).
   Future<void> commit() async {
     try {
       await nativeBatch.commit();
-
-      // Invalidate caches
-      for (final path in _pathsToInvalidate) {
-        await firestore.cache.invalidate(path);
-      }
     } catch (e, st) {
-      throw ErrorMapper.map(
-        FirestorePlusException(
-          type: FirestoreErrorType.unknown,
-          message: 'Batch commit failed: $e',
-          originalException: e,
-          stackTrace: st,
-          operation: 'BATCH COMMIT',
-        ),
-      );
+      throw ErrorMapper.map(e, st, 'BATCH COMMIT');
+    }
+    // Invalidate the affected documents and their collections' queries.
+    for (final path in _pathsToInvalidate) {
+      await firestore.cache.invalidateDocument(path);
     }
   }
 }

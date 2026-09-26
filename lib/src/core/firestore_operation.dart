@@ -1,18 +1,22 @@
 import 'dart:async';
 
 import '../cache/cache_manager.dart';
-import '../cache/cache_policy.dart';
 import '../error/error_mapper.dart';
+import '../error/firestore_plus_exception.dart';
 import '../metrics/firestore_metrics.dart';
 import '../retry/retry_executor.dart';
+import '../retry/retry_policy.dart';
+import 'data_source.dart';
 import 'firestore_operation_options.dart';
 import 'firestore_plus_config.dart';
+
+typedef _ReadResult = ({Map<String, dynamic>? data, DataSource source});
 
 /// Internal executor that orchestrates deduplication, cache, retry, and metrics.
 class FirestoreOperationExecutor {
   final FirestorePlusConfig config;
   final CacheManager cacheManager;
-  final Map<String, Future<Map<String, dynamic>?>> _activeReadRequests = {};
+  final Map<String, Future<_ReadResult>> _activeReadRequests = {};
 
   FirestoreOperationExecutor({
     required this.config,
@@ -33,72 +37,62 @@ class FirestoreOperationExecutor {
       timeout: config.defaultTimeout,
     ).merge(options);
 
+    final operationName = 'GET $path';
     final stopwatch = Stopwatch()..start();
     bool servedFromCache = false;
     int retries = 0;
     Object? finalError;
 
     try {
-      Future<Map<String, dynamic>?> executeWithRetry() async {
-        return await RetryExecutor.execute(
-          operation: () async {
-            if (mergedOptions.timeout != null) {
-              return await fetchFromNetwork().timeout(mergedOptions.timeout!);
-            } else {
-              return await fetchFromNetwork();
-            }
+      Future<Map<String, dynamic>?> executeWithRetry() {
+        return RetryExecutor.execute(
+          operation: () {
+            final timeout = mergedOptions.timeout;
+            return timeout != null
+                ? fetchFromNetwork().timeout(timeout)
+                : fetchFromNetwork();
           },
           policy: mergedOptions.retryPolicy!,
           logger: config.logger,
-          operationName: 'GET $path',
+          operationName: operationName,
+          path: path,
+          onRetry: (n) => retries = n,
         );
       }
 
-      Future<Map<String, dynamic>?> getOrFetchWithDedupe() async {
-        if (!config.enableRequestDeduplication) {
-          return await cacheManager.getOrFetch(
+      Future<_ReadResult> fetch() => cacheManager.getOrFetchWithSource(
             cacheKey: cacheKey,
             policy: mergedOptions.cachePolicy!,
             ttl: mergedOptions.cacheDuration,
             fetchFromNetwork: executeWithRetry,
-            operationName: 'GET $path',
+            operationName: operationName,
           );
-        }
 
-        final dedupeKey = 'read:$cacheKey';
-        if (_activeReadRequests.containsKey(dedupeKey)) {
+      final _ReadResult result;
+      if (!config.enableRequestDeduplication) {
+        result = await fetch();
+      } else {
+        // The policy is part of the key: a cacheOnly read must never hand its
+        // result to a concurrent networkOnly read, and vice versa.
+        final dedupeKey = 'read:${mergedOptions.cachePolicy!.name}:$cacheKey';
+        final inFlight = _activeReadRequests[dedupeKey];
+        if (inFlight != null) {
           config.logger
               .debug('Deduplicating identical read request for $cacheKey');
-          return await _activeReadRequests[dedupeKey]!;
+          result = await inFlight;
+        } else {
+          final future = fetch().whenComplete(() {
+            _activeReadRequests.remove(dedupeKey);
+          });
+          _activeReadRequests[dedupeKey] = future;
+          result = await future;
         }
-
-        final future = cacheManager
-            .getOrFetch(
-          cacheKey: cacheKey,
-          policy: mergedOptions.cachePolicy!,
-          ttl: mergedOptions.cacheDuration,
-          fetchFromNetwork: executeWithRetry,
-          operationName: 'GET $path',
-        )
-            .whenComplete(() {
-          _activeReadRequests.remove(dedupeKey);
-        });
-
-        _activeReadRequests[dedupeKey] = future;
-        return await future;
       }
 
-      final result = await getOrFetchWithDedupe();
-
-      // Determine if it was served from cache purely for metrics (CacheManager logs it internally)
-      // A simplistic check: if networkFirst and it succeeded, it wasn't cache (unless network failed)
-      // Since CacheManager returns the data directly, we might not know 100% here without modifying CacheManager return type.
-      // We will assume it was not served from cache for simplicity unless CacheOnly.
-      servedFromCache = mergedOptions.cachePolicy == CachePolicy.cacheOnly;
-
-      return result;
+      servedFromCache = result.source != DataSource.network;
+      return result.data;
     } catch (e, st) {
-      finalError = ErrorMapper.map(e, st, 'GET $path', path);
+      finalError = ErrorMapper.map(e, st, operationName, path);
       throw finalError;
     } finally {
       stopwatch.stop();
@@ -115,37 +109,56 @@ class FirestoreOperationExecutor {
   }
 
   /// Executes a generic operation (write, delete, etc.) without cache logic, but with retry and timeout.
+  ///
+  /// When [retryOnTimeout] is false and the policy has no custom `retryIf`,
+  /// timeouts are not retried: a timed-out write is still queued by Firestore
+  /// and may commit later, so retrying could apply it twice (e.g. an
+  /// increment).
   Future<void> executeWrite({
     required String path,
     required FirestoreOperationType type,
     required FirestoreOperationOptions? options,
     required Future<void> Function() operation,
+    bool retryOnTimeout = true,
   }) async {
     final mergedOptions = FirestoreOperationOptions(
       retryPolicy: config.defaultRetryPolicy,
       timeout: config.defaultTimeout,
     ).merge(options);
 
+    final operationName = '${type.name.toUpperCase()} $path';
     final stopwatch = Stopwatch()..start();
     int retries = 0;
     Object? finalError;
 
+    var policy = mergedOptions.retryPolicy!;
+    if (!retryOnTimeout && policy.retryIf == null) {
+      policy = RetryPolicy(
+        maxAttempts: policy.maxAttempts,
+        initialDelay: policy.initialDelay,
+        maxDelay: policy.maxDelay,
+        backoffMultiplier: policy.backoffMultiplier,
+        jitter: policy.jitter,
+        retryIf: (e) =>
+            ErrorMapper.isRetryable(e) &&
+            ErrorMapper.map(e).type != FirestoreErrorType.timeout,
+      );
+    }
+
     try {
       await RetryExecutor.execute(
-        operation: () async {
-          if (mergedOptions.timeout != null) {
-            await operation().timeout(mergedOptions.timeout!);
-          } else {
-            await operation();
-          }
+        operation: () {
+          final timeout = mergedOptions.timeout;
+          return timeout != null ? operation().timeout(timeout) : operation();
         },
-        policy: mergedOptions.retryPolicy!,
+        policy: policy,
         logger: config.logger,
-        operationName: '${type.name.toUpperCase()} $path',
+        operationName: operationName,
+        path: path,
+        onRetry: (n) => retries = n,
       );
     } catch (e, st) {
-      finalError =
-          ErrorMapper.map(e, st, '${type.name.toUpperCase()} $path', path);
+      finalError = ErrorMapper.map(e, st, operationName, path);
       throw finalError;
     } finally {
       stopwatch.stop();
@@ -170,8 +183,10 @@ class FirestoreOperationExecutor {
     required int retryCount,
     required Object? error,
   }) {
-    if (config.metricsListener != null) {
-      config.metricsListener!.onOperationComplete(
+    final listener = config.metricsListener;
+    if (listener == null) return;
+    try {
+      listener.onOperationComplete(
         FirestoreOperationMetrics(
           type: type,
           path: path,
@@ -182,6 +197,9 @@ class FirestoreOperationExecutor {
           error: error,
         ),
       );
+    } catch (e, st) {
+      // A faulty listener must not turn a successful operation into a failure.
+      config.logger.warning('Metrics listener threw', error: e, stackTrace: st);
     }
   }
 }

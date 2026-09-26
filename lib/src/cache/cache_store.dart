@@ -26,6 +26,13 @@ class CacheEntry<T> {
 }
 
 /// Abstract interface for a cache storage mechanism.
+///
+/// Keys are either a document path (`users/u1`) or a query key of the form
+/// `<collectionPath>?q=<query>` (e.g. `users?q=all&l=10`).
+///
+/// Values are the raw Firestore document data and may contain Firestore
+/// types such as `Timestamp`, `GeoPoint`, `DocumentReference` and `Blob`.
+/// Persistent implementations must encode and decode these themselves.
 abstract interface class FirestoreCacheStore {
   /// Retrieves a cache entry by [key].
   Future<CacheEntry<Map<String, dynamic>>?> get(String key);
@@ -43,6 +50,7 @@ abstract interface class FirestoreCacheStore {
   /// Clears all entries in the cache.
   Future<void> clear();
 
-  /// Clears all entries related to a specific [collection].
+  /// Clears all entries related to a specific [collection]: the documents
+  /// under `<collection>/` and the query results under `<collection>?`.
   Future<void> clearCollection(String collection);
 }

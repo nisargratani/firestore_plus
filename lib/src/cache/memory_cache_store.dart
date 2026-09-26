@@ -4,6 +4,9 @@ import '../cache/cache_store.dart';
 
 /// An in-memory implementation of [FirestoreCacheStore] with optional
 /// LRU eviction when [maxSize] is exceeded.
+///
+/// Values are copied on write and on read, so callers mutating a returned
+/// map cannot corrupt the cached entry.
 class MemoryCacheStore implements FirestoreCacheStore {
   /// The maximum number of entries in the cache.
   ///
@@ -26,8 +29,12 @@ class MemoryCacheStore implements FirestoreCacheStore {
 
   @override
   Future<void> clearCollection(String collection) async {
-    final prefix = '$collection/';
-    _cache.removeWhere((key, _) => key == collection || key.startsWith(prefix));
+    final docPrefix = '$collection/';
+    final queryPrefix = '$collection?';
+    _cache.removeWhere((key, _) =>
+        key == collection ||
+        key.startsWith(docPrefix) ||
+        key.startsWith(queryPrefix));
   }
 
   @override
@@ -44,7 +51,12 @@ class MemoryCacheStore implements FirestoreCacheStore {
     _cache.remove(key);
     _cache[key] = entry;
 
-    return entry;
+    return CacheEntry(
+      data: _deepCopy(entry.data),
+      createdAt: entry.createdAt,
+      expiresAt: entry.expiresAt,
+      source: entry.source,
+    );
   }
 
   @override
@@ -60,7 +72,7 @@ class MemoryCacheStore implements FirestoreCacheStore {
     _cache.remove(key);
 
     _cache[key] = CacheEntry(
-      data: value,
+      data: _deepCopy(value),
       createdAt: now,
       expiresAt: expiresAt,
     );
@@ -75,6 +87,18 @@ class MemoryCacheStore implements FirestoreCacheStore {
 
   /// The current number of entries in the cache.
   int get length => _cache.length;
+
+  static Map<String, dynamic> _deepCopy(Map<String, dynamic> map) =>
+      map.map((k, v) => MapEntry(k, _copyValue(v)));
+
+  static Object? _copyValue(Object? value) {
+    if (value is Map<String, dynamic>) return _deepCopy(value);
+    if (value is Map) {
+      return value.map((k, v) => MapEntry(k, _copyValue(v)));
+    }
+    if (value is List) return value.map(_copyValue).toList();
+    return value;
+  }
 
   void _evictIfNeeded() {
     if (maxSize <= 0) return;

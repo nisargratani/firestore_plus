@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../core/firestore_operation_options.dart';
@@ -23,6 +26,29 @@ class FirestoreQuery<T> {
 
   /// A representation of the query constraints used to generate cache keys.
   final String _queryId;
+
+  /// Canonical, collision-free encoding of a query value for cache keys.
+  static String _enc(Object? v) {
+    if (v == null) return 'null';
+    if (v is String) return jsonEncode(v);
+    if (v is num || v is bool) return '$v';
+    if (v is Filter) return 'filter:${_enc(v.toJson())}';
+    if (v is FieldPath) return 'path:${_enc(v.components)}';
+    if (v is DocumentReference) return 'ref:${jsonEncode(v.path)}';
+    if (v is Timestamp) return 'ts:${v.seconds}.${v.nanoseconds}';
+    if (v is DateTime) return 'dt:${v.toUtc().toIso8601String()}';
+    if (v is GeoPoint) return 'geo:${v.latitude},${v.longitude}';
+    if (v is Blob) return 'blob:${base64Encode(v.bytes)}';
+    if (v is Map) {
+      final entries = v.entries
+          .map((e) => '${_enc(e.key.toString())}:${_enc(e.value)}')
+          .toList()
+        ..sort();
+      return '{${entries.join(',')}}';
+    }
+    if (v is Iterable) return '[${v.map(_enc).join(',')}]';
+    return jsonEncode(v.toString());
+  }
 
   FirestoreQuery({
     required this.nativeQuery,
@@ -61,54 +87,52 @@ class FirestoreQuery<T> {
   /// Orders the documents by [field].
   FirestoreQuery<T> orderBy(Object field, {bool descending = false}) {
     return _cloneWith(nativeQuery.orderBy(field, descending: descending),
-        'o=$field,d=$descending');
+        'o=${_enc(field)},d=$descending');
   }
 
   /// Starts at the given [document] snapshot.
   FirestoreQuery<T> startAtDocument(DocumentSnapshot document) {
-    return _cloneWith(
-        nativeQuery.startAtDocument(document), 'saDoc=${document.id}');
+    return _cloneWith(nativeQuery.startAtDocument(document),
+        'saDoc=${_enc(document.reference.path)}');
   }
 
   /// Starts after the given [document] snapshot.
   FirestoreQuery<T> startAfterDocument(DocumentSnapshot document) {
-    return _cloneWith(
-        nativeQuery.startAfterDocument(document), 'saftDoc=${document.id}');
+    return _cloneWith(nativeQuery.startAfterDocument(document),
+        'saftDoc=${_enc(document.reference.path)}');
   }
 
   /// Ends at the given [document] snapshot.
   FirestoreQuery<T> endAtDocument(DocumentSnapshot document) {
-    return _cloneWith(
-        nativeQuery.endAtDocument(document), 'eaDoc=${document.id}');
+    return _cloneWith(nativeQuery.endAtDocument(document),
+        'eaDoc=${_enc(document.reference.path)}');
   }
 
   /// Ends before the given [document] snapshot.
   FirestoreQuery<T> endBeforeDocument(DocumentSnapshot document) {
-    return _cloneWith(
-        nativeQuery.endBeforeDocument(document), 'ebDoc=${document.id}');
+    return _cloneWith(nativeQuery.endBeforeDocument(document),
+        'ebDoc=${_enc(document.reference.path)}');
   }
 
   /// Starts at the given [values].
   FirestoreQuery<T> startAt(Iterable<Object?> values) {
-    return _cloneWith(
-        nativeQuery.startAt(values), 'saVals=${values.join(',')}');
+    return _cloneWith(nativeQuery.startAt(values), 'saVals=${_enc(values)}');
   }
 
   /// Starts after the given [values].
   FirestoreQuery<T> startAfter(Iterable<Object?> values) {
     return _cloneWith(
-        nativeQuery.startAfter(values), 'saftVals=${values.join(',')}');
+        nativeQuery.startAfter(values), 'saftVals=${_enc(values)}');
   }
 
   /// Ends at the given [values].
   FirestoreQuery<T> endAt(Iterable<Object?> values) {
-    return _cloneWith(nativeQuery.endAt(values), 'eaVals=${values.join(',')}');
+    return _cloneWith(nativeQuery.endAt(values), 'eaVals=${_enc(values)}');
   }
 
   /// Ends before the given [values].
   FirestoreQuery<T> endBefore(Iterable<Object?> values) {
-    return _cloneWith(
-        nativeQuery.endBefore(values), 'ebVals=${values.join(',')}');
+    return _cloneWith(nativeQuery.endBefore(values), 'ebVals=${_enc(values)}');
   }
 
   /// Filters by the given [field].
@@ -126,8 +150,20 @@ class FirestoreQuery<T> {
     Iterable<Object?>? whereNotIn,
     bool? isNull,
   }) {
-    final segment =
-        'w=$field:eq=$isEqualTo:neq=$isNotEqualTo:lt=$isLessThan:lte=$isLessThanOrEqualTo:gt=$isGreaterThan:gte=$isGreaterThanOrEqualTo:ac=$arrayContains:aca=$arrayContainsAny:wi=$whereIn:wni=$whereNotIn:n=$isNull';
+    final ops = <String, Object?>{
+      'eq': isEqualTo,
+      'neq': isNotEqualTo,
+      'lt': isLessThan,
+      'lte': isLessThanOrEqualTo,
+      'gt': isGreaterThan,
+      'gte': isGreaterThanOrEqualTo,
+      'ac': arrayContains,
+      'aca': arrayContainsAny,
+      'wi': whereIn,
+      'wni': whereNotIn,
+      'n': isNull,
+    }..removeWhere((_, v) => v == null);
+    final segment = 'w=${_enc(field)}:${_enc(ops)}';
     return _cloneWith(
       nativeQuery.where(
         field,
@@ -170,47 +206,45 @@ class FirestoreQuery<T> {
   }
 
   /// Executes the query with pagination.
-  /// Note: Pagination cursors are dynamically fetched, so caching is typically disabled
-  /// or requires careful networkFirst/networkOnly policies to avoid stale cursors.
+  ///
+  /// Fetches `limit + 1` documents so [PaginatedResult.hasMore] is exact.
+  /// Cached pages hold plain document data only; when a page is served from
+  /// cache, the cursor is rebuilt by reading the last document's snapshot.
   Future<PaginatedResult<T>> paginate({
     required int limit,
     PaginationCursor? startAfter,
     FirestoreOperationOptions? options,
   }) async {
-    Query q = nativeQuery.limit(limit);
+    if (limit <= 0) {
+      throw ArgumentError.value(limit, 'limit', 'must be greater than 0');
+    }
+    // Cursor before limit: equivalent in Firestore, and fakes that apply
+    // constraints in call order behave correctly too.
+    Query q = nativeQuery;
     if (startAfter != null) {
       q = q.startAfterDocument(startAfter.document);
     }
+    q = q.limit(limit + 1);
 
-    // Force network only or similar for pagination? We leave it up to the user,
-    // but the cacheKey needs to be unique for the cursor.
-    final cursorId = startAfter?.document.id ?? 'start';
-    final pageCacheKey = '$_cacheKey&l=$limit&saDoc=$cursorId';
+    final cursorPath = startAfter?.document.reference.path;
+    final pageCacheKey =
+        '$_cacheKey&page=$limit&after=${_enc(cursorPath ?? 'start')}';
 
+    DocumentSnapshot? lastSnap;
     final rawData = await firestore.executor.executeRead(
       path: collectionPath,
       cacheKey: pageCacheKey,
       options: options,
       fetchFromNetwork: () async {
         final snap = await q.get();
-        final docs = snap.docs
-            .map((doc) =>
-                {'__id__': doc.id, ...doc.data() as Map<String, dynamic>})
-            .toList();
-
-        // We cannot easily serialize the DocumentSnapshot into the map for Cache,
-        // so caching pagination is technically very difficult.
-        // We won't cache the snapshot, but we can return the native snapshot ID and
-        // the user has to handle it or we fetch the doc again.
-        // Actually, returning the snapshot inside the map will fail caching if the cache doesn't support it.
-        // For our memory cache, it's fine, but not for others.
-
-        // Return a special wrapper that we use internally for parsing
+        final pageDocs = snap.docs.take(limit).toList();
+        lastSnap = pageDocs.isNotEmpty ? pageDocs.last : null;
         return {
-          'docs': docs,
-          // Store the actual snapshot object in memory only temporarily if possible,
-          // or we just return it out-of-band.
-          '_lastSnap': snap.docs.isNotEmpty ? snap.docs.last : null,
+          'docs': [
+            for (final doc in pageDocs)
+              {'__id__': doc.id, ...doc.data() as Map<String, dynamic>},
+          ],
+          'hasMore': snap.docs.length > limit,
         };
       },
     );
@@ -221,15 +255,38 @@ class FirestoreQuery<T> {
 
     final docs = rawData['docs'] as List<dynamic>;
     final items = _mapDocs(docs);
+    final hasMore = rawData['hasMore'] as bool? ?? items.length >= limit;
 
-    // We get the last snap from rawData if available
-    final lastSnap = rawData['_lastSnap'] as DocumentSnapshot?;
+    if (lastSnap == null && docs.isNotEmpty) {
+      final lastId = (docs.last as Map)['__id__'] as String;
+      lastSnap = await _snapshotForCursor(lastId);
+    }
 
     return PaginatedResult<T>(
       items: items,
-      hasMore: items.length >= limit,
-      cursor: lastSnap != null ? PaginationCursor(lastSnap) : null,
+      hasMore: hasMore,
+      cursor: lastSnap != null ? PaginationCursor(lastSnap!) : null,
     );
+  }
+
+  /// Reads the snapshot for a cached page's last document, preferring the
+  /// Firestore local cache. Returns null if it cannot be read.
+  Future<DocumentSnapshot?> _snapshotForCursor(String id) async {
+    final ref = nativeQuery.firestore.collection(collectionPath).doc(id);
+    try {
+      final snap = await ref.get(const GetOptions(source: Source.cache));
+      if (snap.exists) return snap;
+    } catch (_) {
+      // Not in the local cache or unsupported; fall back to the server.
+    }
+    try {
+      final snap = await ref.get();
+      return snap.exists ? snap : null;
+    } catch (e) {
+      firestore.config.logger
+          .warning('Could not rebuild pagination cursor for $id', error: e);
+      return null;
+    }
   }
 
   /// Counts the documents matching the query.
@@ -249,6 +306,9 @@ class FirestoreQuery<T> {
   }
 
   /// A typed stream of query snapshots.
+  ///
+  /// Errors (including deserialization failures) are emitted as
+  /// [FirestorePlusException].
   Stream<List<T>> snapshots() {
     return nativeQuery.snapshots().map((snap) {
       return snap.docs.map((doc) {
@@ -271,7 +331,12 @@ class FirestoreQuery<T> {
           );
         }
       }).toList();
-    });
+    }).transform(StreamTransformer<List<T>, List<T>>.fromHandlers(
+        handleError: (e, st, sink) {
+      sink.addError(
+          ErrorMapper.map(e, st, 'STREAM GET $collectionPath', collectionPath),
+          st);
+    }));
   }
 
   List<T> _mapDocs(List<dynamic> docs) {
