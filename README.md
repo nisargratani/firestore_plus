@@ -27,7 +27,7 @@ Add `firestore_plus` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  firestore_plus: ^0.0.3
+  firestore_plus: ^0.1.0
 ```
 
 Then run:
@@ -36,7 +36,14 @@ Then run:
 flutter pub get
 ```
 
-Requires Flutter 3.27+ / Dart 3.6+ (the minimum supported by `cloud_firestore` 6.x). `firestore_plus` supports every platform `cloud_firestore` supports (Android, iOS, macOS, web, Windows).
+Requires Flutter 3.27+ / Dart 3.6+. `firestore_plus` supports every platform `cloud_firestore` supports (Android, iOS, macOS, web, Windows), with either FlutterFire major:
+
+| Dependency | Supported versions |
+|---|---|
+| `cloud_firestore` | 6.8+ and 7.x |
+| `firebase_core` | 4.13+ and 5.x |
+
+`cloud_firestore` 7 / `firebase_core` 5 keep the same Dart API but raise the native minimums: Firebase Apple SDK 13 (macOS 11 when building with Swift Package Manager) and Firebase Android BoM 35 with `minSdk 24`. Apps that cannot meet those yet can stay on `cloud_firestore` 6.x / `firebase_core` 4.x.
 
 A runnable app that exercises every feature against the Firestore emulator lives in [`example/`](example/).
 
@@ -162,8 +169,8 @@ final user = await users.getById('someId',
 | `networkOnly` | Always fetch from network. Updates cache. |
 | `cacheFirst` | Return cached data if available; otherwise fetch from network. |
 | `cacheOnly` | Return cached data only; never fetch from network. |
-| `networkFirst` | Fetch from network; if it fails, fall back to cache. |
-| `staleWhileRevalidate` | Return cached data immediately; refresh in the background. On a cache miss, behaves like a normal network read (errors are thrown). |
+| `networkFirst` | Fetch from network. If that fails with a **transient** error (`network`, `unavailable`, `timeout`, `resourceExhausted`) and a cached copy exists, return the cached copy and log a warning with the error. Any other error (e.g. `permissionDenied`, `notFound`, `invalidArgument`) is thrown, even when a cached copy exists. |
+| `staleWhileRevalidate` | Return cached data immediately and refresh it in the background. Only one background refresh per cache key runs at a time; hits during a refresh do not start another. On a cache miss, behaves like a normal network read (errors are thrown). |
 
 The default policy is `networkFirst`. By default cache entries have no TTL (`defaultCacheDuration: null`) and live until evicted, invalidated or overwritten.
 
@@ -196,6 +203,8 @@ Writes made through `firestore_plus` (`add`, `set`, `update`, `delete`, batches 
 
 If a document no longer exists on the server, its cache entry is removed on the next network read.
 
+A read that is still in flight when its document or collection is invalidated (by a write, an `invalidate*` call or `clear()`) returns its result to the caller but does not store it, so pre-write data never re-enters the cache. Call `cache.clear()` on logout: reads that were in flight at that moment will not repopulate it.
+
 ## Retry
 
 Configure retry behavior globally or per-operation:
@@ -221,14 +230,15 @@ const RetryPolicy.exponential(maxAttempts: 3)
 const RetryPolicy.none()  // Never retry
 ```
 
-**Custom retry predicate:**
+**Custom retry predicate:** `retryIf` receives the normalized `FirestorePlusException`, the same type the package throws, so you can match on `type`. The original `FirebaseException` or `TimeoutException` is available as `originalException`.
 
 ```dart
 RetryPolicy(
   maxAttempts: 5,
   retryIf: (error) {
     if (error is FirestorePlusException) {
-      return error.type == FirestoreErrorType.timeout;
+      return error.type == FirestoreErrorType.unavailable ||
+          error.type == FirestoreErrorType.timeout;
     }
     return false;
   },
@@ -240,7 +250,7 @@ RetryPolicy(
 **Retryable errors** (by default): `network`, `unavailable`, `timeout`, `resourceExhausted`.
 **Non-retryable errors** (never retried by default): `permissionDenied`, `notFound`, `invalidArgument`, `alreadyExists`, `cancelled`, `serialization`, `unknown`.
 
-**Writes and timeouts:** a write that times out is still queued by Firestore and may commit later. To avoid applying it twice (for example a `FieldValue.increment`), `set`, `update`, `delete` and `add` do **not** retry timeouts by default. Supply your own `retryIf` if you want different behaviour.
+**Writes and timeouts:** a write that times out is still queued by Firestore and may commit later. To avoid applying it twice (for example a `FieldValue.increment`), `set`, `update`, `delete` and `add` **never** retry a `timeout` error (a client-side timeout or the server's `deadline-exceeded`), even with a custom `retryIf`. For writes, `retryIf` decides about every other error; for reads, `exists` and `count` it decides about all errors, timeouts included.
 
 ## Error Handling
 
@@ -260,7 +270,9 @@ try {
 }
 ```
 
-A missing document is **not** an error: `get`/`getById` return `null`. `update` on a missing document throws with type `notFound`. Exceptions you throw yourself inside `runTransaction` are rethrown unchanged.
+A missing document is **not** an error: `get`/`getById` return `null`. `update` on a missing document throws with type `notFound`. Exceptions you throw yourself inside `runTransaction` are rethrown unchanged. A `toFirestore` failure in `set`, `add`, `batch.set` or a transaction's `set` throws with type `serialization`.
+
+With the default `networkFirst` policy, a rejected read (e.g. `permissionDenied` after the user lost access) is thrown even if the document is cached; only transient errors are answered from the cache.
 
 Error types: `network`, `unavailable`, `timeout`, `permissionDenied`, `notFound`, `invalidArgument`, `alreadyExists`, `cancelled`, `resourceExhausted`, `serialization`, `unknown`.
 
@@ -283,7 +295,20 @@ Output format:
 [FirestorePlus] [DEBUG] Cache Policy: cacheFirst for users/user-1
 [FirestorePlus] [DEBUG] CACHE HIT for users/user-1
 [FirestorePlus] [DEBUG] Retry 1/3 for GET users in 250ms due to: ...
+[FirestorePlus] [WARNING] GET users failed with a transient error, serving cached data
+[FirestorePlus] [WARNING] ERROR: FirestorePlusException(type: FirestoreErrorType.unavailable, ...)
 ```
+
+What is logged at each level:
+
+| Level | Messages |
+|---|---|
+| `debug` | Cache policy decisions, hits and misses, retries, deduplication. These include cache keys, and **query cache keys contain filter and cursor values** (for example the e-mail in `where('email', isEqualTo: ...)`). |
+| `info` | Nothing at the moment. |
+| `warning` | A read answered from cache after a transient failure, a failed background refresh, an operation that failed after all its retries, a pagination cursor that could not be rebuilt, a throwing metrics listener. The message names the operation (e.g. `GET users` or `GET users/user-1`) and the error is attached. |
+| `error` | A document in a stream that fails to deserialize. |
+
+Warning and error messages never contain query cache keys or filter values (the attached error is the Firestore error as reported by the SDK). The default `ConsoleFirestoreLogger` level is `info`; enable `debug` only during development, because debug output can contain query values.
 
 **Custom logger**: Extend `FirestorePlusLogger`:
 
@@ -300,7 +325,7 @@ final class MyLogger extends FirestorePlusLogger {
 }
 ```
 
-Document data is **never** logged by default.
+Document data is **never** logged at the default level.
 
 ## Timeouts
 
@@ -411,6 +436,8 @@ final results = await Future.wait([
 ]);
 ```
 
+Only reads with the same cache key and cache policy that are in flight at the same time are coalesced. A read that starts after a write to that document (or, for queries, to that collection) has completed never joins a read that started before the write, so you always read your own writes.
+
 Disable via config:
 
 ```dart
@@ -475,7 +502,9 @@ final firestorePlus = FirestorePlus(
 );
 ```
 
-Keys are either a document path (`users/u1`) or a query key starting with `<collection>?` (e.g. `users?q=...`). Writes invalidate query keys created during the current app session; query results persisted by a previous session are not tracked, so give them a TTL or call `invalidateCollection` at startup. `clearCollection('users')` must remove keys starting with `users/` and `users?`. Values are raw Firestore data and may contain `Timestamp`, `GeoPoint`, `DocumentReference` or `Blob` — a persistent store must encode these itself.
+Keys are either a document path (`users/u1`) or a query key starting with `<collection>?` (e.g. `users?q=...`). Writes invalidate query keys created during the current app session; query results persisted by a previous session are not tracked, so give them a TTL or call `invalidateCollection` at startup.
+
+To keep that bookkeeping bounded, at most `CacheManager.maxTrackedQueryKeysPerCollection` (500) distinct query keys are tracked per collection. When a collection goes over the cap (search-as-you-type is a typical cause), its least recently used query key stops being tracked and is also removed from the store, so it can never be served after a write it would not see. `clearCollection('users')` must remove keys starting with `users/` and `users?`. Values are raw Firestore data and may contain `Timestamp`, `GeoPoint`, `DocumentReference` or `Blob` — a persistent store must encode these itself.
 
 The built-in `MemoryCacheStore` supports configurable `maxSize` (default 500 entries) with LRU eviction, and copies values so mutating a returned object never corrupts the cache.
 

@@ -4,13 +4,15 @@ import 'dart:math' as math;
 import '../logging/firestore_plus_logger.dart';
 import 'retry_policy.dart';
 import '../error/error_mapper.dart';
+import '../error/firestore_plus_exception.dart';
 
 /// Utility class for executing operations with retry logic.
 class RetryExecutor {
   /// Executes the given [operation] according to the [policy].
   ///
   /// [onRetry] is invoked with the retry number (starting at 1) before each
-  /// retry. [path] is attached to the thrown [FirestorePlusException].
+  /// retry. [path] is attached to the thrown [FirestorePlusException] and to
+  /// the exception passed to [RetryPolicy.retryIf].
   static Future<T> execute<T>({
     required Future<T> Function() operation,
     required RetryPolicy policy,
@@ -38,13 +40,13 @@ class RetryExecutor {
           throw ErrorMapper.map(e, st, operationName, path);
         }
 
-        // Determine retryability: user-provided retryIf takes precedence
-        final bool shouldRetry;
-        if (policy.retryIf != null) {
-          shouldRetry = policy.retryIf!(e);
-        } else {
-          shouldRetry = ErrorMapper.isRetryable(e);
-        }
+        // Determine retryability: user-provided retryIf takes precedence. It
+        // receives the normalized FirestorePlusException, like every other
+        // error the package reports (the raw error is in originalException).
+        final retryIf = policy.retryIf;
+        final bool shouldRetry = retryIf != null
+            ? retryIf(ErrorMapper.map(e, st, operationName, path))
+            : ErrorMapper.isRetryable(e);
 
         if (!shouldRetry) {
           logger.debug(

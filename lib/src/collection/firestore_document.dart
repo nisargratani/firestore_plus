@@ -81,23 +81,30 @@ class FirestoreDocument<T> {
       writeAs(FirestoreOperationType.set, data,
           setOptions: setOptions, options: options);
 
-  /// Implementation of [set] that reports [type] in metrics.
+  /// Converts [data] with [toFirestore], reporting failures as a
+  /// [FirestorePlusException] of type [FirestoreErrorType.serialization] for
+  /// [operation] (e.g. `SET users/u1`).
   @internal
-  Future<void> writeAs(FirestoreOperationType type, T data,
-      {SetOptions? setOptions, FirestoreOperationOptions? options}) async {
-    final Map<String, dynamic> serialized;
+  Map<String, dynamic> serialize(T data, String operation) {
     try {
-      serialized = toFirestore(data);
+      return toFirestore(data);
     } catch (e, st) {
       throw FirestorePlusException(
         type: FirestoreErrorType.serialization,
         message: 'Failed to serialize document: $e',
         originalException: e,
         stackTrace: st,
-        operation: '${type.name.toUpperCase()} $path',
+        operation: operation,
         path: path,
       );
     }
+  }
+
+  /// Implementation of [set] that reports [type] in metrics.
+  @internal
+  Future<void> writeAs(FirestoreOperationType type, T data,
+      {SetOptions? setOptions, FirestoreOperationOptions? options}) async {
+    final serialized = serialize(data, '${type.name.toUpperCase()} $path');
     await firestore.executor.executeWrite(
       path: path,
       type: type,

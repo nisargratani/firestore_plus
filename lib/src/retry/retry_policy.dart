@@ -20,6 +20,14 @@ class RetryPolicy {
   ///
   /// If provided, this takes precedence over the default retryable error logic.
   /// Return `true` to retry, `false` to throw immediately.
+  ///
+  /// The error is always a `FirestorePlusException` (check its `type`); the
+  /// original `FirebaseException` or `TimeoutException` is available as its
+  /// `originalException`.
+  ///
+  /// Writes (`set`, `update`, `delete`, `add`) never retry timeouts, whatever
+  /// this returns: a timed-out write may still commit, so retrying it could
+  /// apply it twice.
   final bool Function(Object error)? retryIf;
 
   /// Creates a retry policy. The delay before retry `n` is

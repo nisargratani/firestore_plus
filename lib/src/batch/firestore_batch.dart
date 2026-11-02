@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../collection/firestore_document.dart';
 import '../core/firestore_plus.dart';
 import '../error/error_mapper.dart';
+import '../error/firestore_plus_exception.dart';
 
 /// A typed wrapper for a Firestore WriteBatch.
 ///
@@ -22,8 +23,11 @@ class FirestoreBatch {
   FirestoreBatch(this.nativeBatch, this.firestore);
 
   /// Writes to the document referred to by [doc]. If the document does not exist yet, it will be created.
+  ///
+  /// Throws a [FirestorePlusException] of type
+  /// [FirestoreErrorType.serialization] if `toFirestore` fails.
   void set<T>(FirestoreDocument<T> doc, T data, [SetOptions? options]) {
-    final serialized = doc.toFirestore(data);
+    final serialized = doc.serialize(data, 'BATCH SET ${doc.path}');
     nativeBatch.set(doc.nativeRef, serialized, options);
     _pathsToInvalidate.add(doc.path);
   }

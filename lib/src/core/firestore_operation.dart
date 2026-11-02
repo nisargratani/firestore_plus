@@ -16,7 +16,8 @@ typedef _ReadResult = ({Map<String, dynamic>? data, DataSource source});
 class FirestoreOperationExecutor {
   final FirestorePlusConfig config;
   final CacheManager cacheManager;
-  final Map<String, Future<_ReadResult>> _activeReadRequests = {};
+  final Map<String, ({Future<_ReadResult> result, PendingRead read})>
+      _activeReadRequests = {};
 
   /// Creates an executor. Internal to `FirestorePlus`; not intended for
   /// direct use.
@@ -81,22 +82,30 @@ class FirestoreOperationExecutor {
         // The policy is part of the key: a cacheOnly read must never hand its
         // result to a concurrent networkOnly read, and vice versa.
         final dedupeKey = 'read:${mergedOptions.cachePolicy!.name}:$cacheKey';
-        final inFlight = _activeReadRequests[dedupeKey];
-        if (inFlight != null) {
+        final active = _activeReadRequests[dedupeKey];
+        // Read-your-writes: a read must not join one that started before the
+        // key was last invalidated (e.g. by a write that has completed since).
+        if (active != null && !active.read.invalidated) {
           config.logger
               .debug('Deduplicating identical read request for $cacheKey');
-          result = await inFlight;
+          result = await active.result;
         } else {
-          // The removed value is this same in-flight future; it must not be
-          // returned (whenComplete would wait on itself), only dropped.
-          final future = fetch().whenComplete(
-              () => unawaited(_activeReadRequests.remove(dedupeKey)));
-          _activeReadRequests[dedupeKey] = future;
+          final read = cacheManager.beginRead(cacheKey);
+          final future = fetch().whenComplete(() {
+            cacheManager.endRead(read);
+            // An older read finishing must not drop a newer read's entry.
+            if (identical(_activeReadRequests[dedupeKey]?.read, read)) {
+              _activeReadRequests.remove(dedupeKey);
+            }
+          });
+          _activeReadRequests[dedupeKey] = (result: future, read: read);
           result = await future;
         }
       }
 
-      servedFromCache = result.source != DataSource.network;
+      // A cacheOnly miss returns no data: nothing was served from cache.
+      servedFromCache =
+          result.source != DataSource.network && result.data != null;
       return result.data;
     } catch (e, st) {
       final mapped = ErrorMapper.map(e, st, operationName, path);
@@ -118,10 +127,11 @@ class FirestoreOperationExecutor {
 
   /// Executes a generic operation (write, delete, etc.) without cache logic, but with retry and timeout.
   ///
-  /// When [retryOnTimeout] is false and the policy has no custom `retryIf`,
-  /// timeouts are not retried: a timed-out write is still queued by Firestore
-  /// and may commit later, so retrying could apply it twice (e.g. an
-  /// increment).
+  /// When [retryOnTimeout] is false, timeouts (including `deadline-exceeded`)
+  /// are never retried, whatever the policy's `retryIf` says: a timed-out
+  /// write is still queued by Firestore and may commit later, so retrying
+  /// could apply it twice (e.g. an increment). `retryIf` still decides for
+  /// every other error.
   Future<void> executeWrite({
     required String path,
     required FirestoreOperationType type,
@@ -140,7 +150,8 @@ class FirestoreOperationExecutor {
     FirestorePlusException? finalError;
 
     var policy = mergedOptions.retryPolicy!;
-    if (!retryOnTimeout && policy.retryIf == null) {
+    if (!retryOnTimeout) {
+      final userRetryIf = policy.retryIf;
       policy = RetryPolicy(
         maxAttempts: policy.maxAttempts,
         initialDelay: policy.initialDelay,
@@ -148,8 +159,8 @@ class FirestoreOperationExecutor {
         backoffMultiplier: policy.backoffMultiplier,
         jitter: policy.jitter,
         retryIf: (e) =>
-            ErrorMapper.isRetryable(e) &&
-            ErrorMapper.map(e).type != FirestoreErrorType.timeout,
+            ErrorMapper.map(e).type != FirestoreErrorType.timeout &&
+            (userRetryIf?.call(e) ?? ErrorMapper.isRetryable(e)),
       );
     }
 

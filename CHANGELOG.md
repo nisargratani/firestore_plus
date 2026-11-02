@@ -1,3 +1,62 @@
+## 0.1.0
+
+Fixes from an external QA pass (issue IDs FSP-01 to FSP-11). Each fix has a
+regression test in `test/regressions_0_1_0_test.dart`.
+
+### Bug fixes
+
+* FSP-01: `networkFirst` (the default policy) no longer serves cached data
+  when the server rejects a read (e.g. `permission-denied`); only transient
+  errors fall back to the cache, and the fallback warning includes the error.
+* FSP-02: a read that is in flight while its document or collection is
+  written, invalidated or `cache.clear()`ed no longer stores its pre-write
+  result in the cache.
+* FSP-03: dependency constraints now allow `cloud_firestore` 7.x and
+  `firebase_core` 5.x (see Dependencies).
+* FSP-04: request deduplication no longer hands a read that started after a
+  completed write the result of an older, pre-write read.
+* FSP-05: `RetryPolicy.retryIf` now receives the normalized
+  `FirestorePlusException`, so the README "Custom retry predicate" example
+  retries as documented.
+* FSP-06: writes no longer retry timeouts when a custom `retryIf` is set, so
+  a `FieldValue.increment` can no longer be applied more than once.
+* FSP-07: warning-level logs no longer print query cache keys, which contain
+  filter values such as e-mail addresses; they name the operation instead.
+* FSP-08: metrics no longer report a `cacheOnly` miss as
+  `servedFromCache: true`.
+* FSP-09: `staleWhileRevalidate` runs at most one background refresh per
+  cache key at a time instead of one per cache hit.
+* FSP-10: the per-collection registry of query cache keys is capped at
+  `CacheManager.maxTrackedQueryKeysPerCollection` (500), so memory and the
+  work done by each write stay bounded.
+* FSP-11: `toFirestore` failures in `FirestoreBatch.set` and
+  `FirestoreTransaction.set` now throw a `serialization`
+  `FirestorePlusException` (with `path`), like `set` does.
+
+### Dependencies
+
+* `cloud_firestore: ">=6.8.0 <8.0.0"` and `firebase_core: ">=4.13.0 <6.0.0"`
+  (were `^6.8.0` / `^4.13.0`). The 7.x / 5.x majors keep the same Dart API
+  but need Firebase Apple SDK 13 (macOS 11 with Swift Package Manager) and
+  Android `minSdk 24`. Tested at both ends of the range.
+* Dev: `fake_cloud_firestore: ^4.4.0` (first release that allows
+  `cloud_firestore` 7); `pub_semver` and `yaml` for the constraint test.
+
+### Behaviour changes to note
+
+* `networkFirst` no longer masks non-transient errors: `permissionDenied`,
+  `notFound`, `invalidArgument` and `unknown` errors are thrown even when the
+  document or query is cached. Only `network`, `unavailable`, `timeout` and
+  `resourceExhausted` fall back to the cache.
+* `retryIf` now receives a `FirestorePlusException` instead of the raw
+  `FirebaseException` / `TimeoutException`. Predicates that check
+  `error is FirebaseException` must check `error.type` (or
+  `error.originalException`) instead.
+* Writes (`set`, `update`, `delete`, `add`) never retry timeouts, even with a
+  custom `retryIf`; `retryIf` still decides about every other error.
+* When a collection has more than 500 distinct cached queries, the least
+  recently used query result is evicted from the cache store.
+
 ## 0.0.3
 
 ### Bug fixes

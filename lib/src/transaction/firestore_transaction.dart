@@ -52,8 +52,11 @@ class FirestoreTransaction {
   }
 
   /// Writes to the document referred to by [doc].
+  ///
+  /// Throws a [FirestorePlusException] of type
+  /// [FirestoreErrorType.serialization] if `toFirestore` fails.
   void set<T>(FirestoreDocument<T> doc, T data, [SetOptions? options]) {
-    final serialized = doc.toFirestore(data);
+    final serialized = doc.serialize(data, 'TRANSACTION SET ${doc.path}');
     nativeTransaction.set(doc.nativeRef, serialized, options);
     _writtenPaths.add(doc.path);
   }
